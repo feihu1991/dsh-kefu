@@ -1,0 +1,4 @@
+# dsh-kefu bundle patch: 挂载客服平台插件到 profile
+- insert:
+    - id: kefu
+      name: 'dsh-kefu'

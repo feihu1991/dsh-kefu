@@ -1,0 +1,15 @@
+{
+  "name": "kefu-client",
+  "private": true,
+  "version": "0.1.0",
+  "description": "DSH 客服平台桌面客户端（Tauri 2）—— 连接服务器上的 dsh-kefu 客服平台",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icons": "tauri icon public/icon.png"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

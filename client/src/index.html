@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DSH 客服平台</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <!-- 设置页 -->
+  <div id="settings" class="settings hidden">
+    <div class="card">
+      <h1>DSH 客服平台</h1>
+      <p class="sub">桌面客户端 · 输入服务器地址后连接。服务器需安装并启动 <b>dsh-kefu</b> 插件。</p>
+      <label>服务器地址</label>
+      <input id="server-url" type="text" placeholder="http://192.168.1.100:3080" />
+      <div id="status" class="status"></div>
+      <div class="actions">
+        <button id="save" class="primary">保存并连接</button>
+        <button id="open-browser" class="ghost">用浏览器打开</button>
+      </div>
+      <p class="tip">提示：地址为运行 dsh web 的服务器 IP + 端口，例如 http://192.168.1.100:3080</p>
+    </div>
+  </div>
+
+  <!-- 主界面：内嵌客服平台 -->
+  <div id="main" class="main hidden">
+    <div id="bar" class="bar">
+      <span id="bar-url" class="url"></span>
+      <button id="back" class="ghost small">返回设置</button>
+      <button id="refresh" class="ghost small">刷新</button>
+      <button id="external" class="ghost small">浏览器打开</button>
+    </div>
+    <iframe id="frame" src="about:blank"></iframe>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
