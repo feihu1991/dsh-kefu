@@ -5,6 +5,7 @@ import Dashboard from "./pages/dashboard.jsx";
 import AgentsPage from "./pages/agents.jsx";
 import ConversationsPage from "./pages/conversations.jsx";
 import UsersPage from "./pages/users.jsx";
+import KbPage from "./pages/kb.jsx";
 import AdminPage from "./pages/admin.jsx";
 
 export default function App() {
@@ -33,6 +34,7 @@ export default function App() {
     ["dashboard", "仪表盘"],
     ["agents", "店员管理"],
     ["conversations", "会话接待"],
+    ["kb", "知识库"],
     ["users", "账号管理"],
     ...(isAdmin ? [["admin", "平台管理"]] : []),
   ];
@@ -63,6 +65,7 @@ export default function App() {
         {page === "agents" && <AgentsPage session={session} />}
         {page === "conversations" && <ConversationsPage session={session} />}
         {page === "users" && <UsersPage session={session} />}
+        {page === "kb" && <KbPage session={session} />}
         {page === "admin" && <AdminPage session={session} />}
       </div>
     </div>

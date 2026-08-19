@@ -83,7 +83,14 @@ export async function runConversationTurn({ ctx, store, config }, { merchant, ag
 
   const agentOptions = { provider, model };
   if (maxTokens) agentOptions.maxTokens = maxTokens;
-  const persona = buildPersona(agent, merchant, tier);
+  // 知识库检索：把与顾客问题相关的商家资料注入人设（RAG v1，FTS5）
+  let knowledge = [];
+  try {
+    knowledge = store.searchKnowledge(merchant.id, agent.id, content, 5);
+  } catch (err) {
+    ctx.logger?.warn?.(`[kefu] knowledge search failed: ${err?.message}`);
+  }
+  const persona = buildPersona(agent, merchant, tier, knowledge);
 
   // 第一次消息 -> create；之后 -> resume（会话由 DSH 持久化）
   const handle = conversation.meta?.started
@@ -138,12 +145,18 @@ export async function runConversationTurn({ ctx, store, config }, { merchant, ag
   }
 }
 
-/** 拼装 system prompt 人设（商家 + 店员 + 档位） */
-function buildPersona(agent, merchant, tier) {
+/** 拼装 system prompt 人设（商家 + 店员 + 档位 + 知识库参考） */
+function buildPersona(agent, merchant, tier, knowledge = []) {
   const parts = [];
   parts.push(`你是「${merchant.name}」店铺的在线客服「${agent.name}」。`);
   if (tier) parts.push(`你的服务等级：${tier.name}。`);
   if (agent.persona) parts.push(agent.persona);
+  if (knowledge.length > 0) {
+    parts.push("店铺知识库资料是权威依据：回答必须优先依据资料，资料明确写明的信息（如快递公司、发货时限、退换政策、优惠力度）要直接照实回答，不得含糊、不得自行编造；资料未覆盖的问题才说明无法确认并建议转人工。资料如下：");
+    for (const doc of knowledge) {
+      parts.push(`【${doc.title}】${doc.content}`);
+    }
+  }
   parts.push(
     "工作要求：礼貌、简洁、准确地回答顾客问题；不确定的事情不要编造，主动说明并建议转人工；回答使用与顾客相同的语言。"
   );

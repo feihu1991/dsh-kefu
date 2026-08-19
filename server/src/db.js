@@ -109,6 +109,20 @@ CREATE TABLE IF NOT EXISTS widget_tokens (
   created_at  INTEGER NOT NULL
 );
 
+-- 商家知识库（agent_id 为空 = 全店共享；FTS5 trigram 支持中文子串检索）
+CREATE TABLE IF NOT EXISTS kb_docs (
+  id          TEXT PRIMARY KEY,
+  merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+  agent_id    TEXT REFERENCES agents(id) ON DELETE CASCADE,
+  title       TEXT NOT NULL,
+  content     TEXT NOT NULL,
+  tags        TEXT DEFAULT '',
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kb_merchant ON kb_docs(merchant_id, updated_at DESC);
+CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5(doc_id UNINDEXED, title, content, tokenize='trigram');
+
 -- 审计日志
 CREATE TABLE IF NOT EXISTS audit_log (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -354,11 +368,11 @@ export class KefuStore {
   }
 
   listConversations({ merchantId, agentId = null, status = null, channel = null, limit = 50, offset = 0 }) {
-    const where = ["merchant_id = ?"];
+    const where = ["c.merchant_id = ?"];
     const vals = [merchantId];
-    if (agentId) { where.push("agent_id = ?"); vals.push(agentId); }
-    if (status) { where.push("status = ?"); vals.push(status); }
-    if (channel) { where.push("channel = ?"); vals.push(channel); }
+    if (agentId) { where.push("c.agent_id = ?"); vals.push(agentId); }
+    if (status) { where.push("c.status = ?"); vals.push(status); }
+    if (channel) { where.push("c.channel = ?"); vals.push(channel); }
     vals.push(limit, offset);
     const rows = this.db
       .prepare(
@@ -461,6 +475,118 @@ export class KefuStore {
 
   deleteWidgetToken(token) {
     this.db.prepare("DELETE FROM widget_tokens WHERE token = ?").run(token);
+  }
+
+  // ---------- 知识库 ----------
+  createKbDoc({ id = randomUUID(), merchantId, agentId = null, title, content, tags = "" }) {
+    const t = now();
+    this.db.prepare(
+      `INSERT INTO kb_docs (id, merchant_id, agent_id, title, content, tags, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(id, merchantId, agentId, title, content, tags, t, t);
+    this.db.prepare("INSERT INTO kb_fts (doc_id, title, content) VALUES (?, ?, ?)").run(id, title, content);
+    return this.getKbDoc(id);
+  }
+
+  getKbDoc(id) {
+    return this.db.prepare("SELECT * FROM kb_docs WHERE id = ?").get(id) ?? null;
+  }
+
+  listKbDocs(merchantId, agentId = null) {
+    if (agentId) {
+      return this.db.prepare("SELECT * FROM kb_docs WHERE merchant_id = ? AND (agent_id = ? OR agent_id IS NULL) ORDER BY updated_at DESC").all(merchantId, agentId);
+    }
+    return this.db.prepare("SELECT * FROM kb_docs WHERE merchant_id = ? ORDER BY updated_at DESC").all(merchantId);
+  }
+
+  updateKbDoc(id, fields) {
+    const allowed = ["title", "content", "tags", "agent_id"];
+    const sets = [];
+    const vals = [];
+    for (const key of Object.keys(fields)) {
+      if (!allowed.includes(key)) continue;
+      sets.push(`${key} = ?`);
+      vals.push(fields[key]);
+    }
+    if (sets.length === 0) return this.getKbDoc(id);
+    sets.push("updated_at = ?");
+    vals.push(now());
+    this.db.prepare(`UPDATE kb_docs SET ${sets.join(", ")} WHERE id = ?`).run(...vals, id);
+    const doc = this.getKbDoc(id);
+    if (doc) {
+      this.db.prepare("DELETE FROM kb_fts WHERE doc_id = ?").run(id);
+      this.db.prepare("INSERT INTO kb_fts (doc_id, title, content) VALUES (?, ?, ?)").run(id, doc.title, doc.content);
+    }
+    return doc;
+  }
+
+  deleteKbDoc(id) {
+    this.db.prepare("DELETE FROM kb_docs WHERE id = ?").run(id);
+    this.db.prepare("DELETE FROM kb_fts WHERE doc_id = ?").run(id);
+  }
+
+  countKbDocs(merchantId) {
+    return this.db.prepare("SELECT COUNT(*) AS n FROM kb_docs WHERE merchant_id = ?").get(merchantId).n;
+  }
+
+  /**
+   * 知识库检索（v1 混合检索）：
+   * 1) FTS5 trigram 整句/子句短语匹配（精确）；
+   * 2) 未命中时按 2 字窗口提取关键词做 LIKE 模糊匹配（召回，中文口语问题常用）；
+   * 按命中顺序去重返回。
+   * @returns {Array<{id, title, content, tags}>}
+   */
+  searchKnowledge(merchantId, agentId, query, limit = 5) {
+    const q = String(query ?? "").trim();
+    if (q.length < 3) return [];
+    const seen = new Set();
+    const hits = [];
+    const push = (row) => {
+      if (seen.has(row.id)) return;
+      seen.add(row.id);
+      hits.push({ id: row.id, title: row.title, content: row.content, tags: row.tags });
+    };
+    const escape = (s) => String(s).replace(/"/g, '""');
+
+    // ---- 1) FTS5 trigram 短语匹配 ----
+    const candidates = [q];
+    const parts = q.split(/[，。！？、；,.!?;\s]+/).map((s) => s.trim()).filter((s) => s.length >= 3);
+    for (const p of parts) if (!candidates.includes(p)) candidates.push(p);
+    for (const cand of candidates.slice(0, 12)) {
+      const rows = this.db.prepare(
+        `SELECT f.doc_id AS id, d.title, d.content, d.tags, f.rank
+         FROM kb_fts f JOIN kb_docs d ON d.id = f.doc_id
+         WHERE d.merchant_id = ? AND (d.agent_id = ? OR d.agent_id IS NULL)
+           AND kb_fts MATCH ?
+         ORDER BY f.rank LIMIT ?`
+      ).all(merchantId, agentId, `"${escape(cand)}"`, limit);
+      for (const row of rows) {
+        push(row);
+        if (hits.length >= limit) return hits;
+      }
+    }
+
+    // ---- 2) LIKE 关键词回退（2 字窗口，去停用词） ----
+    if (hits.length === 0) {
+      const STOP = "的了是在有我你他她它你们我们咱们什么怎么请问哪个哪家多久发会能可以吗呢啊吧呀哦与和或及这那要多少钱价格";
+      const cleaned = q.replace(/[，。！？、；,.!?;\s'"“”‘’]+/g, "");
+      const grams = new Set();
+      for (let i = 0; i + 2 <= cleaned.length; i++) {
+        const g = cleaned.slice(i, i + 2);
+        if (STOP.includes(g)) continue;
+        grams.add(g);
+      }
+      const base = "SELECT id, title, content, tags FROM kb_docs WHERE merchant_id = ? AND (agent_id = ? OR agent_id IS NULL) AND (content LIKE ? OR title LIKE ?) ORDER BY updated_at DESC LIMIT ?";
+      const stmt = this.db.prepare(base);
+      for (const g of [...grams].slice(0, 10)) {
+        const rows = stmt.all(merchantId, agentId, `%${g}%`, `%${g}%`, limit);
+        for (const row of rows) {
+          push(row);
+          if (hits.length >= limit) return hits;
+        }
+      }
+    }
+    return hits;
   }
 
   // ---------- audit ----------

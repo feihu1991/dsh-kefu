@@ -44,7 +44,16 @@ export default function AgentsPage({ session }) {
   const createWidget = async (agent) => {
     try {
       const d = await api(`/agents/${agent.id}/widget-tokens`, { method: "POST" });
-      alert(`网页客服地址已生成（复制到浏览器打开预览）：\n${location.origin}${d.url}\n\n完整地址：${location.origin}${d.url}`);
+      const page = `${location.origin}${d.url}`;
+      const sdk = `<script src="${location.origin}/kefu/kefu-sdk.js" data-token="${d.token}" data-server="${location.origin}"><\/script>`;
+      const demo = `${location.origin}/kefu/sdk-demo.html?token=${d.token}`;
+      alert(
+        `网页客服已生成！\n\n` +
+        `① 独立问答页（可发链接/iframe 嵌入）：\n${page}\n\n` +
+        `② 悬浮球 SDK（店铺页面加一行）：\n${sdk}\n\n` +
+        `③ 悬浮球演示页：\n${demo}\n\n` +
+        `凭据仅此显示一次，请妥善保存（可在控制台随时重新生成）。`
+      );
     } catch (ex) {
       alert(ex.message);
     }

@@ -238,11 +238,11 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       const q = reqUrl(req);
       const rows = store.listConversations({
         merchantId: merchant.id,
-        agentId: q.get("agentId") || null,
-        status: q.get("status") || null,
-        channel: q.get("channel") || null,
-        limit: Math.min(Number(q.get("limit") ?? 50), 200),
-        offset: Math.max(Number(q.get("offset") ?? 0), 0),
+        agentId: q.searchParams.get("agentId") || null,
+        status: q.searchParams.get("status") || null,
+        channel: q.searchParams.get("channel") || null,
+        limit: Math.min(Number(q.searchParams.get("limit") ?? 50), 200),
+        offset: Math.max(Number(q.searchParams.get("offset") ?? 0), 0),
       });
       return sendJson(res, 200, { data: { conversations: rows } });
     }
@@ -418,6 +418,77 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       return sendJson(res, 200, { data: { ok: true } });
     }
 
+    // --- 知识库（merchant_admin） ---
+    if (pathname === "/kb" && method === "GET") {
+      requireRole(user, ROLES.MERCHANT_ADMIN);
+      const q = reqUrl(req);
+      const rows = store.listKbDocs(merchant.id, q.searchParams.get("agentId") || null);
+      return sendJson(res, 200, { data: { docs: rows, count: rows.length } });
+    }
+
+    if (pathname === "/kb" && method === "POST") {
+      requireRole(user, ROLES.MERCHANT_ADMIN);
+      const body = await readJson(req);
+      const title = clean(body.title, 200);
+      const content = clean(body.content, 20000);
+      if (!title || !content) {
+        return sendJson(res, 400, { error: { code: "BAD_REQUEST", message: "标题和内容不能为空" } });
+      }
+      let agentId = null;
+      if (body.agentId) {
+        const a = scopedAgent(store, merchant.id, body.agentId);
+        if (!a) return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "Agent 不存在" } });
+        agentId = a.id;
+      }
+      const doc = store.createKbDoc({
+        merchantId: merchant.id, agentId, title, content, tags: clean(body.tags, 200),
+      });
+      store.audit({ actorId: user.id, merchantId: merchant.id, action: "kb.create", detail: title });
+      return sendJson(res, 201, { data: { doc } });
+    }
+
+    if (/^\/kb\/[^/]+$/.test(pathname) && method === "GET") {
+      requireRole(user, ROLES.MERCHANT_ADMIN);
+      const id = pathname.split("/")[2];
+      const doc = store.getKbDoc(id);
+      if (!doc || doc.merchant_id !== merchant.id) return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "资料不存在" } });
+      return sendJson(res, 200, { data: { doc } });
+    }
+
+    if (/^\/kb\/[^/]+$/.test(pathname) && method === "PATCH") {
+      requireRole(user, ROLES.MERCHANT_ADMIN);
+      const id = pathname.split("/")[2];
+      const doc = store.getKbDoc(id);
+      if (!doc || doc.merchant_id !== merchant.id) return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "资料不存在" } });
+      const body = await readJson(req);
+      const fields = {};
+      if (body.title !== undefined) fields.title = clean(body.title, 200);
+      if (body.content !== undefined) fields.content = clean(body.content, 20000);
+      if (body.tags !== undefined) fields.tags = clean(body.tags, 200);
+      if (body.agentId !== undefined) {
+        if (body.agentId) {
+          const a = scopedAgent(store, merchant.id, body.agentId);
+          if (!a) return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "Agent 不存在" } });
+          fields.agent_id = a.id;
+        } else {
+          fields.agent_id = null;
+        }
+      }
+      const updated = store.updateKbDoc(id, fields);
+      store.audit({ actorId: user.id, merchantId: merchant.id, action: "kb.update", detail: updated.title });
+      return sendJson(res, 200, { data: { doc: updated } });
+    }
+
+    if (/^\/kb\/[^/]+$/.test(pathname) && method === "DELETE") {
+      requireRole(user, ROLES.MERCHANT_ADMIN);
+      const id = pathname.split("/")[2];
+      const doc = store.getKbDoc(id);
+      if (!doc || doc.merchant_id !== merchant.id) return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "资料不存在" } });
+      store.deleteKbDoc(id);
+      store.audit({ actorId: user.id, merchantId: merchant.id, action: "kb.delete", detail: doc.title });
+      return sendJson(res, 200, { data: { ok: true } });
+    }
+
     // --- 统计 ---
     if (pathname === "/stats" && method === "GET") {
       const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
@@ -493,7 +564,7 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
 
     if (pathname === "/admin/users" && method === "GET") {
       const q = reqUrl(req);
-      const merchantId = q.get("merchantId");
+      const merchantId = q.searchParams.get("merchantId");
       return sendJson(res, 200, { data: { users: store.listUsers(merchantId).map(publicUser) } });
     }
 

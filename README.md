@@ -87,13 +87,20 @@ DEEPSEEK_API_KEY=sk-xxx dsh web --host 0.0.0.0 --port 3080
   - 多轮上下文由 DSH 会话持久化自动续接
 - 回复通过 SSE 流式返回（`delta` 事件含文本与思考过程；`done` 含最终文本与 token 用量）
 
-### 客服网页问答（v1 已可用，规划见 docs/）
-- 商家在「店员管理 → 网页客服」生成凭据 token
-- 公开接口（免登录、按 IP + token 双限流）：
-  - `GET  {base}/widget/<token>/config` — 商家名 / 客服名 / 欢迎语
-  - `POST {base}/widget/<token>/messages` — 聊天（按 visitorId 续接同一会话）
-- 自带最小可用的问答页 `{base}/widget/<token>`，可直接发给顾客，也可 iframe 嵌入店铺网页
-- **规划**：可定制皮肤、知识库 RAG（商家上传商品/售后资料）、转人工、订单查询插件
+### 知识库（RAG v1）
+- 商家在「知识库」录入商品资料 / 售后政策 / 常见问答（可指定某 Agent 专用或全店共享）
+- 顾客提问时自动检索（FTS5 trigram 整句匹配 + 2 字关键词 LIKE 回退，中文口语友好），
+  把命中的资料作为权威依据注入客服 system prompt，回答优先照实引用资料、不编造
+
+### 客服网页问答（v1 可用 + v2 悬浮球 SDK）
+- 商家在「店员管理 → 网页客服」生成凭据 token，拿到三种接入方式：
+  1. **独立问答页** `{base}/widget/<token>`：可发链接，可 iframe 嵌入店铺网页
+  2. **悬浮球 SDK**（推荐）：店铺页面加一行 `<script src="{server}/kefu/kefu-sdk.js" data-token="…">`，
+     右下角气泡聊天面板，自动续接会话（演示页 `{base}/sdk-demo.html?token=…`）
+  3. 公开接口（免登录、按 IP + token 双限流）：
+     - `GET  {base}/widget/<token>/config` — 商家名 / 客服名 / 欢迎语
+     - `POST {base}/widget/<token>/messages` — 聊天（按 visitorId 续接同一会话）
+- **规划**：知识库向量化（语义检索）、转人工、订单查询工具
 
 ### 限流
 - 登录：10 次/分钟/IP；注册：按 IP；聊天：30 次/分钟/账号 + 60 次/分钟/IP；网页客服：10 次/分钟/凭据
@@ -114,6 +121,7 @@ DEEPSEEK_API_KEY=sk-xxx dsh web --host 0.0.0.0 --port 3080
 | GET/POST | `/conversations/:id/messages` | 历史 / 发消息（SSE 流式） |
 | PATCH | `/conversations/:id` | 关闭 / 重开 / 改标题 |
 | GET/POST | `/users` | 商家账号（merchant_admin） |
+| GET/POST | `/kb` `/kb/:id` | 知识库（商家管理员） |
 | GET | `/stats` | 商家统计 |
 | GET/POST | `/admin/merchants` `/admin/users` `/admin/tiers` | 平台管理 |
 | GET/PATCH | `/admin/settings` | 平台设置（注册开关 / 限流） |

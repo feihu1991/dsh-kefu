@@ -8,6 +8,8 @@
     "build": "vite build && node copy-widget.mjs"
   },
   "dependencies": {
+    "@esbuild/linux-arm64": "^0.25.12",
+    "esbuild": "^0.25.12",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
