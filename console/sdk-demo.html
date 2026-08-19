@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>客服 SDK 演示</title>
+<style>
+  body { font-family: system-ui, "PingFang SC", sans-serif; margin: 0; padding: 40px; background: #f7f8fa; color: #222; }
+  h1 { font-size: 20px; }
+  code { background: #eef1f6; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+  .box { background: #fff; border: 1px solid #e3e7f0; border-radius: 10px; padding: 20px; max-width: 720px; line-height: 1.9; }
+</style>
+</head>
+<body>
+<h1>客服 SDK 演示页</h1>
+<div class="box">
+  这是 <b>dsh-kefu 网页客服 SDK（悬浮球）</b> 的演示页面。<br />
+  点击右下角气泡与客服对话。商家嵌入店铺网页的写法：
+  <pre>&lt;script src="https://SERVER/kefu/kefu-sdk.js"
+        data-token="你的凭据"
+        data-server="https://SERVER"&gt;&lt;/script&gt;</pre>
+  本页通过 URL 参数注入 token：<code>/kefu/sdk-demo.html?token=xxxx</code>
+</div>
+<script>
+(function () {
+  var token = new URLSearchParams(location.search).get("token");
+  if (!token) return;
+  var s = document.createElement("script");
+  s.src = location.origin + "/kefu/kefu-sdk.js";
+  s.setAttribute("data-token", token);
+  s.setAttribute("data-server", location.origin);
+  document.body.appendChild(s);
+})();
+</script>
+</body>
+</html>
