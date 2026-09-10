@@ -2,39 +2,165 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <title>在线客服</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f2f4f8; color: #222; }
-  .wrap { max-width: 640px; margin: 0 auto; min-height: 100vh; display: flex; flex-direction: column; }
-  .head { background: #4d6bfe; color: #fff; padding: 16px 20px; }
-  .head h1 { font-size: 18px; }
-  .head .sub { font-size: 12px; opacity: .85; margin-top: 4px; }
-  .body { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
-  .msg { max-width: 78%; padding: 10px 14px; border-radius: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; font-size: 14px; }
-  .msg.user { align-self: flex-end; background: #4d6bfe; color: #fff; border-bottom-right-radius: 4px; }
-  .msg.assistant { align-self: flex-start; background: #fff; border: 1px solid #e3e7f0; border-bottom-left-radius: 4px; }
-  .msg .who { font-size: 11px; color: #8b96ad; margin-bottom: 4px; }
-  .input { display: flex; gap: 10px; padding: 12px; background: #fff; border-top: 1px solid #e3e7f0; }
-  .input textarea { flex: 1; resize: none; height: 52px; padding: 10px; border: 1px solid #d5dbe8; border-radius: 8px; font: inherit; outline: none; }
-  .input button { padding: 0 20px; border: 0; border-radius: 8px; background: #4d6bfe; color: #fff; font-size: 14px; cursor: pointer; }
-  .input button:disabled { opacity: .5; }
-  .tip { text-align: center; color: #8b96ad; font-size: 12px; padding: 8px; }
+  :root {
+    --brand: #4f6ef7;
+    --brand2: #7b93ff;
+    --bg: #f3f6fd;
+    --text: #172035;
+    --muted: #7b879f;
+    --line: #e3e9f3;
+  }
+  html, body { height: 100%; }
+  body {
+    font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background:
+      radial-gradient(600px 300px at 50% -10%, rgba(123, 147, 255, .22), transparent 66%),
+      var(--bg);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 680px;
+    margin: 0 auto;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: rgba(255,255,255,.72);
+    box-shadow: 0 0 60px rgba(23, 34, 63, .08);
+  }
+  .head {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 17px 20px;
+    color: #fff;
+    background: linear-gradient(120deg, #4f6ef7 0%, #7b93ff 58%, #9b6bff 100%);
+    box-shadow: 0 10px 28px rgba(79, 110, 247, .26);
+  }
+  .avatar {
+    width: 42px;
+    height: 42px;
+    border-radius: 15px;
+    background: rgba(255,255,255,.2);
+    border: 1px solid rgba(255,255,255,.34);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+  .head .meta { min-width: 0; }
+  .head h1 { font-size: 17px; letter-spacing: .2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .head .sub { font-size: 12px; opacity: .9; margin-top: 3px; display: flex; align-items: center; gap: 6px; }
+  .head .sub::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #7CFFB2;
+    box-shadow: 0 0 0 4px rgba(124, 255, 178, .2);
+    flex-shrink: 0;
+  }
+  .body {
+    flex: 1;
+    padding: 20px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-y: auto;
+    background:
+      radial-gradient(460px 260px at 100% 0%, rgba(123, 147, 255, .07), transparent 70%);
+  }
+  .msg {
+    max-width: 80%;
+    padding: 11px 15px;
+    border-radius: 18px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 14px;
+    animation: msg-in .18s ease;
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: linear-gradient(135deg, var(--brand), var(--brand2));
+    color: #fff;
+    border-bottom-right-radius: 6px;
+    box-shadow: 0 8px 18px rgba(79, 110, 247, .22);
+  }
+  .msg.assistant {
+    align-self: flex-start;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-bottom-left-radius: 6px;
+    box-shadow: 0 4px 16px rgba(23, 34, 63, .06);
+  }
+  .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 5px; font-weight: 650; }
+  .msg.user .who { color: rgba(255,255,255,.78); }
+  .input {
+    display: flex;
+    gap: 10px;
+    padding: 13px 14px calc(13px + env(safe-area-inset-bottom));
+    background: rgba(255,255,255,.94);
+    backdrop-filter: blur(12px);
+    border-top: 1px solid var(--line);
+  }
+  .input textarea {
+    flex: 1;
+    resize: none;
+    height: 54px;
+    padding: 11px 13px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: #f8fafd;
+    color: var(--text);
+    font: inherit;
+    outline: none;
+    transition: border-color .16s, box-shadow .16s, background .16s;
+  }
+  .input textarea:focus { border-color: var(--brand2); background: #fff; box-shadow: 0 0 0 4px rgba(79, 110, 247, .1); }
+  .input button {
+    min-width: 72px;
+    padding: 0 18px;
+    border: 0;
+    border-radius: 14px;
+    background: linear-gradient(135deg, var(--brand), var(--brand2));
+    color: #fff;
+    font-size: 14px;
+    font-weight: 650;
+    cursor: pointer;
+    box-shadow: 0 10px 20px rgba(79, 110, 247, .24);
+    transition: transform .14s, box-shadow .14s;
+  }
+  .input button:hover { transform: translateY(-1px); box-shadow: 0 13px 24px rgba(79, 110, 247, .3); }
+  .input button:disabled { opacity: .5; transform: none; box-shadow: none; }
+  .tip { text-align: center; color: var(--muted); font-size: 11px; padding: 6px 8px 10px; }
+  @keyframes msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="head">
-    <h1 id="merchant">在线客服</h1>
-    <div class="sub" id="agent">正在连接…</div>
+    <div class="avatar">客</div>
+    <div class="meta">
+      <h1 id="merchant">在线客服</h1>
+      <div class="sub" id="agent">正在连接…</div>
+    </div>
   </div>
   <div class="body" id="body"></div>
   <div class="input">
     <textarea id="input" placeholder="请输入您的问题…"></textarea>
     <button id="send">发送</button>
   </div>
-  <div class="tip">DSH 客服平台 · 网页问答组件（v1）</div>
+  <div class="tip">DSH 客服平台 · 智能客服</div>
 </div>
 <script>
 (function () {

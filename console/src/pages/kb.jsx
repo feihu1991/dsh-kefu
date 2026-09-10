@@ -1,18 +1,35 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
+import { Icon, Card, PageHeader, Badge, Empty, Modal, formatDate } from "../ui.jsx";
 
 export default function KbPage({ session }) {
   const [docs, setDocs] = useState([]);
   const [agents, setAgents] = useState([]);
-  const [show, setShow] = useState(null); // null | {} | doc
+  const [show, setShow] = useState(null);
+  const [search, setSearch] = useState("");
   const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
   const isAdmin = session.user.role === "merchant_admin";
 
-  const load = () => {
-    api("/kb").then((d) => setDocs(d.docs)).catch(() => {});
-    api("/agents").then((d) => setAgents(d.agents)).catch(() => {});
+  const load = async () => {
+    try {
+      const [d, a] = await Promise.all([api("/kb"), api("/agents").catch(() => ({ agents: [] }))]);
+      setDocs(d.docs || []);
+      setAgents(a.agents || []);
+    } finally {
+      setLoading(false);
+    }
   };
   useEffect(load, []);
+
+  const filtered = useMemo(() => docs.filter((d) => {
+    if (!search.trim()) return true;
+    const q = search.trim().toLowerCase();
+    return [d.title, d.content, d.tags].filter(Boolean).some((s) => String(s).toLowerCase().includes(q));
+  }), [docs, search]);
+
+  const openCreate = () => { setErr(""); setShow({ title: "", content: "", tags: "", agentId: "" }); };
+  const openEdit = (doc) => { setErr(""); setShow({ ...doc, agentId: doc.agent_id || "" }); };
 
   const save = async (e) => {
     e.preventDefault();
@@ -22,74 +39,88 @@ export default function KbPage({ session }) {
       if (show.id) await api(`/kb/${show.id}`, { method: "PATCH", body });
       else await api("/kb", { method: "POST", body });
       setShow(null);
-      load();
+      await load();
     } catch (ex) {
       setErr(ex.message);
     }
   };
 
-  const del = async (doc) => {
+  const remove = async (doc) => {
     if (!confirm(`确认删除资料「${doc.title}」？`)) return;
     await api(`/kb/${doc.id}`, { method: "DELETE" });
-    load();
+    await load();
   };
 
+  const agentName = (id) => agents.find((a) => a.id === id)?.name || "指定 Agent";
+
   return (
-    <div className="page">
-      <div className="row" style={{ justifyContent: "space-between", marginBottom: 16 }}>
-        <h2 style={{ margin: 0 }}>知识库</h2>
-        {isAdmin && <button className="btn primary" onClick={() => setShow({ title: "", content: "", tags: "", agentId: "" })}>+ 新建资料</button>}
-      </div>
-      <div className="card">
-        <div className="muted small" style={{ marginBottom: 12 }}>
-          录入商品资料、售后政策、常见问题。顾客提问时，客服 Agent 会自动检索相关知识并优先依据它回答。
-          {!isAdmin && "（仅商家管理员可维护）"}
-        </div>
-        {docs.length === 0 && <div className="empty">还没有知识库资料{isAdmin ? "，点击右上角新建" : ""}</div>}
-        {docs.map((d) => (
-          <div key={d.id} className="list-item">
-            <div className="info">
-              <div className="row">
-                <span className="name">{d.title}</span>
-                {d.tags && <span className="badge">{d.tags}</span>}
-                {d.agent_id ? <span className="badge warn">仅 {agents.find((a) => a.id === d.agent_id)?.name ?? "某Agent"}</span> : <span className="badge ok">全店共享</span>}
-              </div>
-              <div className="desc">{d.content.slice(0, 120)}{d.content.length > 120 ? "…" : ""}</div>
-            </div>
-            {isAdmin && (
-              <div className="row">
-                <button className="btn small" onClick={() => setShow(d)}>编辑</button>
-                <button className="btn small danger" onClick={() => del(d)}>删除</button>
-              </div>
-            )}
-          </div>
-        ))}
+    <div>
+      <PageHeader
+        title="知识库"
+        subtitle="录入商品资料、售后政策和常见问答，客服回答时会优先依据命中的资料"
+        actions={isAdmin && <button className="btn primary" onClick={openCreate}><Icon name="plus" size={16} />新建资料</button>}
+      />
+
+      <div className="toolbar">
+        <div className="search"><Icon name="search" size={16} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索标题、内容或标签" /></div>
+        <span className="muted small">共 {docs.length} 条资料</span>
       </div>
 
+      {loading ? (
+        <div className="card" style={{ display: "grid", placeItems: "center", minHeight: 220 }}><span className="spinner" /></div>
+      ) : filtered.length === 0 ? (
+        <Card><Empty icon="book" title={docs.length === 0 ? "还没有知识库资料" : "没有匹配的资料"} desc={docs.length === 0 ? "把商品参数、发货时效、退换政策录入进来，客服回答会更准确。" : "换个关键词试试。"} action={isAdmin && docs.length === 0 && <button className="btn primary" onClick={openCreate}>新建资料</button>} /></Card>
+      ) : (
+        <div className="kb-grid">
+          {filtered.map((doc) => (
+            <Card key={doc.id} className="kb-card">
+              <div className="row-between">
+                <h3>{doc.title}</h3>
+                <Badge tone={doc.agent_id ? "brand" : "ok"}>{doc.agent_id ? `仅 ${agentName(doc.agent_id)}` : "全店共享"}</Badge>
+              </div>
+              <div className="kb-content">{doc.content}</div>
+              <div className="row wrap" style={{ gap: 6 }}>
+                {(doc.tags || "").split(",").filter(Boolean).map((tag) => <span key={tag} className="tag"><Icon name="tag" size={11} />{tag.trim()}</span>)}
+              </div>
+              <div className="kb-foot">
+                <span className="muted small">更新于 {formatDate(doc.updated_at)}</span>
+                {isAdmin && (
+                  <div className="list-actions">
+                    <button className="btn small" onClick={() => openEdit(doc)}>编辑</button>
+                    <button className="btn small danger" onClick={() => remove(doc)}><Icon name="trash" size={13} /></button>
+                  </div>
+                )}
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
       {show && (
-        <div className="modal-mask" onClick={() => setShow(null)}>
-          <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={save}>
-            <h3>{show.id ? "编辑资料" : "新建知识库资料"}</h3>
-            <div className="field"><label>标题</label><input value={show.title} onChange={(e) => setShow({ ...show, title: e.target.value })} required /></div>
+        <Modal
+          title={show.id ? "编辑知识库资料" : "新建知识库资料"}
+          description="资料越具体，RAG 命中越准确。建议一条资料只讲一件事。"
+          onClose={() => setShow(null)}
+          width={640}
+          footer={<><button className="btn" onClick={() => setShow(null)}>取消</button><button className="btn primary" type="submit" form="kb-form">保存</button></>}
+        >
+          <form id="kb-form" onSubmit={save}>
+            <div className="field"><label>标题</label><input value={show.title} onChange={(e) => setShow({ ...show, title: e.target.value })} placeholder="例如：发货时效说明" required /></div>
             <div className="field">
-              <label>适用范围（留空 = 全店共享）</label>
-              <select value={show.agentId ?? ""} onChange={(e) => setShow({ ...show, agentId: e.target.value })}>
-                <option value="">全店共享</option>
-                {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              <label>适用范围</label>
+              <select value={show.agentId || ""} onChange={(e) => setShow({ ...show, agentId: e.target.value })}>
+                <option value="">全店共享（所有 Agent 可检索）</option>
+                {agents.map((a) => <option key={a.id} value={a.id}>仅 {a.name}</option>)}
               </select>
             </div>
             <div className="field">
-              <label>内容（商品参数 / 售后政策 / 常见问答…）</label>
-              <textarea rows={8} value={show.content} onChange={(e) => setShow({ ...show, content: e.target.value })} required placeholder="例如：本店默认发顺丰快递，48小时内发货；7天无理由退换，运费险已赠…" />
+              <label>内容</label>
+              <textarea rows={8} value={show.content} onChange={(e) => setShow({ ...show, content: e.target.value })} placeholder="例如：本店默认发顺丰，现货 24 小时内发货；7 天无理由退换，退货运费险已赠。" required />
             </div>
-            <div className="field"><label>标签（逗号分隔，可选）</label><input value={show.tags} onChange={(e) => setShow({ ...show, tags: e.target.value })} /></div>
+            <div className="field"><label>标签（逗号分隔，可选）</label><input value={show.tags} onChange={(e) => setShow({ ...show, tags: e.target.value })} placeholder="发货, 物流, 售后" /></div>
             {err && <div className="err">{err}</div>}
-            <div className="row" style={{ justifyContent: "flex-end" }}>
-              <button type="button" className="btn" onClick={() => setShow(null)}>取消</button>
-              <button type="submit" className="btn primary">保存</button>
-            </div>
           </form>
-        </div>
+        </Modal>
       )}
     </div>
   );
