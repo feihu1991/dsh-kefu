@@ -37,7 +37,7 @@
 
 ## 快速部署（服务器）
 
-前置：Node 18+ / pnpm、DeepSeek Harness（`npm i -g @deepseek-ai/dsh`）、一个模型 API Key。
+前置：Node 22.5+ / pnpm（数据层使用 `node:sqlite`，Node 18/20 不可用）、DeepSeek Harness（`npm i -g @deepseek-ai/dsh`）、一个模型 API Key。
 
 ```bash
 # 1. 构建控制台前端（产物写入 server/public/）
@@ -63,6 +63,11 @@ DEEPSEEK_API_KEY=sk-xxx dsh web --host 0.0.0.0 --port 3080
 
 > 对外暴露端口时建议在前面加一层反向代理（HTTPS），并把
 > `dsh web --trusted-host` 加上你的域名（远程浏览器设置功能需要）。
+>
+> 推荐的插件配置：
+> - HTTPS 部署时设置 `secureCookie: true`，为会话 Cookie 增加 `Secure` 标志；
+> - 只有请求确实经过可信反向代理时才设置 `trustProxy: true`，此时按 `X-Forwarded-For` 最右侧地址做 IP 限流；
+> - 默认 `exposeSessionToken: false`，登录只下发 HttpOnly Cookie；仅当外部客户端必须使用 Bearer 时才显式开启。
 
 ## 核心能力
 
@@ -77,7 +82,7 @@ DEEPSEEK_API_KEY=sk-xxx dsh web --host 0.0.0.0 --port 3080
 | `superadmin` | 平台管理：商家 / 账号 / 档位 / 平台设置 / 审计 |
 | `merchant_admin` | 商家管理员：建店员账号、建/改/停 Agent、网页客服凭据、接待 |
 | `merchant_staff` | 店员：仅接待会话 |
-- 密码 scrypt 存储；登录连续失败 5 次锁定 15 分钟；会话 12 小时（Cookie + Bearer）
+- 密码 scrypt 存储；登录连续失败 5 次锁定 15 分钟；会话 12 小时（默认仅 HttpOnly Cookie，`exposeSessionToken: true` 时额外支持 Bearer）
 
 ### 店员 Agent
 - 商家创建 Agent：名称、人设话术、**服务档位**（商家只看到档位名，如「高级客服」，看不到 provider/model）
@@ -136,6 +141,9 @@ DEEPSEEK_API_KEY=sk-xxx dsh web --host 0.0.0.0 --port 3080
 # 控制台开发（vite 代理到 3080 的 dsh web）
 cd console && npm run dev
 
+# 插件 API + Agent 工具隔离测试（不需要模型 API Key）
+cd server && pnpm install && pnpm test
+
 # 用独立 DSH_HOME 起一个测试实例（不动正式实例）
 DSH_HOME=~/.dsh-kefu dsh --profile web --host 127.0.0.1 --port 3100
 
@@ -145,9 +153,10 @@ $DSH_HOME/kefu/merchants/<id>/      # 商家工作区
 ```
 
 ## 安全注意
-- 上线必须 HTTPS（反向代理），否则密码/会话 Cookie 会被嗅探
+- 上线必须 HTTPS（反向代理），并设置 `secureCookie: true`，否则密码/会话 Cookie 会被嗅探
+- 只有经过可信反向代理时才设置 `trustProxy: true`；否则保留默认值，直接按 TCP 对端地址限流
 - 建议关闭自助注册（平台设置），由超管统一开账号
-- 客服 Agent 已禁用工具，但 DSH 本体能力仍在同一进程中；不要把平台部署在不可信网络
+- 客服 Agent 通过 `tools.restrict({ allow: [] })` 白名单禁用全部工具；若目标 DSH 不支持该能力，接待会 fail-closed（直接失败），不会带着工具继续运行。升级 DSH 后请跑工具可见性冒烟测试
 - 定期备份 `kefu.sqlite` 与 `merchants/` 目录
 
 ## License

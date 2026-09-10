@@ -184,14 +184,11 @@ function registerPersona(agentCtx, persona) {
   });
   // 3) 抑制动态运行时上下文（工作区/工具提示等噪音）
   agentCtx.systemPrompt?.suppressRuntimeContext?.();
-  // 4) 客服 Agent 不需要任何 DSH 工具 —— 全部禁用
-  try {
-    agentCtx.tools?.restrict?.({ deny: [
-      "bash", "bash-persistent", "pwsh", "fs", "fs-search", "str-replace-editor",
-      "web", "subagent", "subagent-control", "todo", "skill", "jobs", "goal",
-      "ralph", "workflow", "ask-user", "presentation", "mcp", "mcp-call",
-    ] });
-  } catch (err) {
-    agentCtx.logger?.warn?.(`[kefu] tools.restrict failed: ${err?.message}`);
+  // 4) 客服 Agent 不需要任何 DSH 工具 —— 用 allow: [] 白名单全部禁用。
+  //    restrict 不存在或调用失败时必须让本轮接待失败（fail-closed），
+  //    绝不能吞掉错误后让 Agent 带着 bash/fs/web 等工具继续运行。
+  if (typeof agentCtx.tools?.restrict !== "function") {
+    throw new Error("dsh-kefu: 当前 DSH 不支持 tools.restrict，无法保证客服 Agent 不调用工具，已拒绝本次接待");
   }
+  agentCtx.tools.restrict({ allow: [] });
 }

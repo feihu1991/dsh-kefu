@@ -17,8 +17,14 @@
     "multi-tenant"
   ],
   "license": "MIT",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "test": "node test/e2e.mjs && node test/agents.test.mjs"
+  },
   "dependencies": {
-    "@deepseek-ai/dsh-llm": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.7",
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "peerDependencies": {

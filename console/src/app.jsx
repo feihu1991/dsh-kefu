@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { api, setToken, getToken } from "./api.js";
+import { api } from "./api.js";
 import LoginPage from "./pages/login.jsx";
 import Dashboard from "./pages/dashboard.jsx";
 import AgentsPage from "./pages/agents.jsx";
@@ -41,7 +41,6 @@ export default function App() {
 
   const logout = async () => {
     try { await api("/auth/logout", { method: "POST" }); } catch { /* ignore */ }
-    setToken(null);
     setSession(null);
   };
 

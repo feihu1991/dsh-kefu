@@ -1,4 +1,4 @@
-// API 客户端：自动带 token，SSE 聊天支持
+// API 客户端：会话走 HttpOnly Cookie，SSE 聊天支持
 const BASE = "/kefu/api";
 
 export async function api(path, { method = "GET", body } = {}) {
@@ -19,16 +19,6 @@ export async function api(path, { method = "GET", body } = {}) {
     throw err;
   }
   return payload?.data ?? payload;
-}
-
-export function setToken(token) {
-  // 会话同时走 HttpOnly Cookie（服务端已种），token 仅用于需要显式携带的场景
-  if (token) localStorage.setItem("kefu_token", token);
-  else localStorage.removeItem("kefu_token");
-}
-
-export function getToken() {
-  return localStorage.getItem("kefu_token");
 }
 
 /** SSE 聊天：POST 消息并流式接收 delta/done/error */

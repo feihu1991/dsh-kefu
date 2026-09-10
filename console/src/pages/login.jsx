@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { api, setToken } from "../api.js";
+import { api } from "../api.js";
 
 export default function LoginPage({ onLogin }) {
   const [mode, setMode] = useState("login");
@@ -15,8 +15,7 @@ export default function LoginPage({ onLogin }) {
     setBusy(true);
     try {
       if (mode === "login") {
-        const data = await api("/auth/login", { method: "POST", body: { username: form.username, password: form.password } });
-        setToken(data.token);
+        await api("/auth/login", { method: "POST", body: { username: form.username, password: form.password } });
         const me = await api("/auth/me");
         onLogin(me);
       } else {
@@ -24,8 +23,7 @@ export default function LoginPage({ onLogin }) {
           method: "POST",
           body: { name: form.name, username: form.username, password: form.password, displayName: form.displayName },
         });
-        const data = await api("/auth/login", { method: "POST", body: { username: form.username, password: form.password } });
-        setToken(data.token);
+        await api("/auth/login", { method: "POST", body: { username: form.username, password: form.password } });
         const me = await api("/auth/me");
         onLogin(me);
       }

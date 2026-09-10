@@ -12,6 +12,12 @@ import { runConversationTurn } from "./agents.js";
 import { now, safeJson } from "./db.js";
 
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const RATE_LIMIT_KEYS = new Set([
+  "perMinute", "burst",
+  "authPerMinute", "authBurst",
+  "widgetPerMinute", "widgetBurst",
+  "ipPerMinute", "ipBurst",
+]);
 
 /** 构造 API 路由处理器 */
 export function createApiHandler({ store, config, limiters, state, ctx }) {
@@ -41,7 +47,7 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
   async function authRoutes(req, res, pathname) {
     const { method } = req;
     if (pathname === "/auth/register" && method === "POST") {
-      const rl = limiters.ip.check(`ip:${clientIp(req)}:register`);
+      const rl = limiters.ip.check(`ip:${clientIp(req, config)}:register`);
       if (!rl.allowed) return sendJson(res, 429, { error: { code: "RATE_LIMITED", message: "注册太频繁，请稍后再试" } });
       const body = await readJson(req);
       const name = clean(body.name, 64);
@@ -50,16 +56,20 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       if (!name || !username || password.length < 6) {
         return sendJson(res, 400, { error: { code: "BAD_REQUEST", message: "商家名/用户名/密码（至少6位）不能为空" } });
       }
+      if (state.platform.allowRegistration === false) {
+        return sendJson(res, 403, { error: { code: "REGISTRATION_CLOSED", message: "当前未开放自助注册，请联系平台管理员开通账号" } });
+      }
       if (store.getUserByUsername(username)) {
         return sendJson(res, 409, { error: { code: "USERNAME_TAKEN", message: "用户名已被占用" } });
       }
-      if (config.allowRegistration === false) {
-        return sendJson(res, 403, { error: { code: "REGISTRATION_CLOSED", message: "当前未开放自助注册，请联系平台管理员开通账号" } });
+      // scrypt 是异步的；await 之后再查重一次，消除并发同名注册竞态。
+      const { hash, salt } = await hashPasswordSplit(password);
+      if (store.getUserByUsername(username)) {
+        return sendJson(res, 409, { error: { code: "USERNAME_TAKEN", message: "用户名已被占用" } });
       }
       const dataDir = join(config.dataDir, "merchants", randomUUID());
       mkdirSync(dataDir, { recursive: true });
       const merchant = store.createMerchant({ name, contact: clean(body.contact, 128), dataDir });
-      const { hash, salt } = await hashPasswordSplit(password);
       const user = store.createUser({
         merchantId: merchant.id, username, passwordHash: hash, passwordSalt: salt,
         role: ROLES.MERCHANT_ADMIN, displayName: clean(body.displayName, 64) || username,
@@ -72,7 +82,7 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       const body = await readJson(req);
       const username = clean(body.username, 64);
       const password = String(body.password ?? "");
-      const ip = clientIp(req);
+      const ip = clientIp(req, config);
       const ipLim = limiters.auth.check(`ip:${ip}:login`);
       if (!ipLim.allowed) return sendJson(res, 429, { error: { code: "RATE_LIMITED", message: "登录尝试过多，请稍后再试" } });
 
@@ -100,15 +110,18 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
         userId: user.id, merchantId: user.merchant_id, ttlMs: SESSION_TTL_MS,
         userAgent: String(req.headers["user-agent"] ?? "").slice(0, 200),
       });
-      res.setHeader("Set-Cookie", `kefu_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`);
+      res.setHeader("Set-Cookie", sessionCookie(token, Math.floor(SESSION_TTL_MS / 1000), config));
       store.audit({ actorId: user.id, merchantId: user.merchant_id, action: "auth.login", detail: `IP ${ip}` });
-      return sendJson(res, 200, { data: { token, user: publicUser(user), merchant: publicMerchant(merchant) } });
+      const data = { user: publicUser(user), merchant: publicMerchant(merchant) };
+      // 默认不把会话 token 暴露给 JS；仅 HttpOnly Cookie 已足够同源控制台使用。
+      if (config.exposeSessionToken === true) data.token = token;
+      return sendJson(res, 200, { data });
     }
 
     if (pathname === "/auth/logout" && method === "POST") {
       const token = req.auth?.token;
       if (token) store.deleteSession(createHash("sha256").update(token).digest("hex"));
-      res.setHeader("Set-Cookie", "kefu_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+      res.setHeader("Set-Cookie", sessionCookie("", 0, config));
       return sendJson(res, 200, { data: { ok: true } });
     }
 
@@ -120,7 +133,7 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
           user: publicUser(auth.user),
           merchant: publicMerchant(auth.merchant),
           platform: {
-            allowRegistration: config.allowRegistration !== false,
+            allowRegistration: state.platform.allowRegistration !== false,
             tiers: store.listTiers(true).map(publicTier),
           },
         },
@@ -241,8 +254,8 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
         agentId: q.searchParams.get("agentId") || null,
         status: q.searchParams.get("status") || null,
         channel: q.searchParams.get("channel") || null,
-        limit: Math.min(Number(q.searchParams.get("limit") ?? 50), 200),
-        offset: Math.max(Number(q.searchParams.get("offset") ?? 0), 0),
+        limit: pageInt(q.searchParams.get("limit"), 50, 1, 200),
+        offset: pageInt(q.searchParams.get("offset"), 0, 0, 1_000_000),
       });
       return sendJson(res, 200, { data: { conversations: rows } });
     }
@@ -288,7 +301,7 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       // 限流：每用户 + 每 IP
       const userLim = limiters.chat.check(`user:${user.id}:chat`);
       if (!userLim.allowed) return sendJson(res, 429, { error: { code: "RATE_LIMITED", message: "发送太频繁，请稍后再试" } });
-      const ipLim = limiters.ip.check(`ip:${clientIp(req)}:chat`);
+      const ipLim = limiters.ip.check(`ip:${clientIp(req, config)}:chat`);
       if (!ipLim.allowed) return sendJson(res, 429, { error: { code: "RATE_LIMITED", message: "发送太频繁，请稍后再试" } });
 
       // 同一会话串行处理
@@ -376,8 +389,11 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       if (store.getUserByUsername(username)) {
         return sendJson(res, 409, { error: { code: "USERNAME_TAKEN", message: "用户名已被占用" } });
       }
-      const role = body.role === ROLES.MERCHANT_STAFF ? ROLES.MERCHANT_STAFF : ROLES.MERCHANT_STAFF;
+      const role = ROLES.MERCHANT_STAFF;
       const { hash, salt } = await hashPasswordSplit(password);
+      if (store.getUserByUsername(username)) {
+        return sendJson(res, 409, { error: { code: "USERNAME_TAKEN", message: "用户名已被占用" } });
+      }
       const u = store.createUser({
         merchantId: merchant.id, username, passwordHash: hash, passwordSalt: salt, role,
         displayName: clean(body.displayName, 64) || username,
@@ -396,6 +412,9 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       if (body.displayName !== undefined) fields.display_name = clean(body.displayName, 64);
       if (body.status !== undefined) fields.status = body.status === "active" ? "active" : "disabled";
       if (body.password) {
+        if (String(body.password).length < 6) {
+          return sendJson(res, 400, { error: { code: "BAD_REQUEST", message: "密码至少 6 位" } });
+        }
         const { hash, salt } = await hashPasswordSplit(body.password);
         fields.password_hash = hash;
         fields.password_salt = salt;
@@ -491,6 +510,9 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
 
     // --- 统计 ---
     if (pathname === "/stats" && method === "GET") {
+      if (!merchant) {
+        return sendJson(res, 403, { error: { code: "FORBIDDEN", message: "平台管理员请使用「平台管理」查看统计" } });
+      }
       const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
       return sendJson(res, 200, {
         data: {
@@ -583,6 +605,9 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       }
       const role = body.role === ROLES.MERCHANT_ADMIN || body.role === ROLES.MERCHANT_STAFF ? body.role : ROLES.MERCHANT_STAFF;
       const { hash, salt } = await hashPasswordSplit(password);
+      if (store.getUserByUsername(username)) {
+        return sendJson(res, 409, { error: { code: "USERNAME_TAKEN", message: "用户名已被占用" } });
+      }
       const u = store.createUser({
         merchantId, username, passwordHash: hash, passwordSalt: salt, role,
         displayName: clean(body.displayName, 64) || username,
@@ -601,6 +626,9 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       if (body.status !== undefined) fields.status = body.status === "active" ? "active" : "disabled";
       if (body.role !== undefined && [ROLES.MERCHANT_ADMIN, ROLES.MERCHANT_STAFF, ROLES.SUPERADMIN].includes(body.role)) fields.role = body.role;
       if (body.password) {
+        if (String(body.password).length < 6) {
+          return sendJson(res, 400, { error: { code: "BAD_REQUEST", message: "密码至少 6 位" } });
+        }
         const { hash, salt } = await hashPasswordSplit(body.password);
         fields.password_hash = hash;
         fields.password_salt = salt;
@@ -672,10 +700,22 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
     if (pathname === "/admin/settings" && method === "PATCH") {
       const body = await readJson(req);
       if (body.allowRegistration !== undefined) state.platform.allowRegistration = body.allowRegistration === true;
-      if (body.rateLimit !== undefined && typeof body.rateLimit === "object") {
+      if (body.rateLimit !== undefined) {
+        if (!body.rateLimit || typeof body.rateLimit !== "object" || Array.isArray(body.rateLimit)) {
+          return sendJson(res, 400, { error: { code: "BAD_REQUEST", message: "rateLimit 必须是对象" } });
+        }
+        for (const [key, value] of Object.entries(body.rateLimit)) {
+          if (!RATE_LIMIT_KEYS.has(key)) {
+            return sendJson(res, 400, { error: { code: "BAD_REQUEST", message: `不支持的限流字段：${key}` } });
+          }
+          if (!Number.isInteger(value) || value <= 0 || value > 1_000_000) {
+            return sendJson(res, 400, { error: { code: "BAD_REQUEST", message: `限流值 ${key} 必须是 1~1000000 的整数` } });
+          }
+        }
         state.platform.rateLimit = { ...state.platform.rateLimit, ...body.rateLimit };
       }
-      state.save();
+      state.save?.();
+      state.rebuildLimiters?.();
       return sendJson(res, 200, { data: { settings: state.platform } });
     }
 
@@ -686,6 +726,9 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
 
   async function widgetRoutes(req, res, pathname) {
     const { method } = req;
+
+    // 所有公开 widget 响应都带 CORS，保证错误响应也能被店铺页面读取。
+    res.setHeader("Access-Control-Allow-Origin", "*");
 
     // 跨域预检（浏览器从商家网页调用时必需）
     if (method === "OPTIONS") {
@@ -728,7 +771,7 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       const merchant = store.getMerchant(agent.merchant_id);
       if (!merchant || merchant.status !== "active") return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "客服组件不存在或已停用" } });
 
-      const ip = clientIp(req);
+      const ip = clientIp(req, config);
       const ipLim = limiters.ip.check(`ip:${ip}:widget`);
       if (!ipLim.allowed) return sendJson(res, 429, { error: { code: "RATE_LIMITED", message: "发送太频繁，请稍后再试" } });
       const tkLim = limiters.widget.check(`token:${token}:widget`);
@@ -803,8 +846,26 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
 
   async function hashPasswordSplit(password) {
     const hash = await hashPassword(password);
-    const [, salt] = hash.split("$").slice(4, 6);
-    return { hash, salt: hash };
+    const parts = hash.split("$");
+    return { hash, salt: parts[4] ?? "" };
+  }
+
+  function sessionCookie(token, maxAgeSeconds, cfg) {
+    const secure = cfg.secureCookie ? "; Secure" : "";
+    const path = cfg.basePath && cfg.basePath.startsWith("/") ? cfg.basePath : "/";
+    return `kefu_session=${token}; Path=${path}; HttpOnly; SameSite=Lax${secure}; Max-Age=${maxAgeSeconds}`;
+  }
+
+  function pageInt(raw, fallback, min, max) {
+    if (raw === null || raw === "") return fallback;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < min || n > max) {
+      const err = new Error("分页参数无效");
+      err.code = "BAD_REQUEST";
+      err.status = 400;
+      throw err;
+    }
+    return n;
   }
 
   function publicTier(t) {

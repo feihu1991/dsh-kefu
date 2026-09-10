@@ -6,11 +6,13 @@ export class RateLimiter {
   /**
    * @param {object} opts
    * @param {number} opts.perMinute - 每分钟允许次数
-   * @param {number} [opts.burst] - 突发上限（默认 = perMinute * 2）
+   * @param {number} [opts.burst] - 窗口内硬上限（默认 = perMinute * 2；小于 perMinute 时更严格）
+   * @param {number} [opts.maxKeys] - 最多跟踪的 key 数量，防止伪造来源导致内存膨胀
    */
-  constructor({ perMinute, burst }) {
+  constructor({ perMinute, burst, maxKeys = 50000 }) {
     this.perMinute = perMinute;
     this.burst = burst ?? perMinute * 2;
+    this.maxKeys = maxKeys;
     this.windows = new Map(); // key -> number[] timestamps
     this.lastSweep = Date.now();
   }
@@ -26,13 +28,21 @@ export class RateLimiter {
     }
     let hits = this.windows.get(key);
     if (!hits) {
+      // 新 key 先清理过期窗口；仍达到上限则拒绝新来源，避免无界增长。
+      if (this.windows.size >= this.maxKeys) {
+        this.sweep(now);
+        if (this.windows.size >= this.maxKeys) {
+          return { allowed: false, remaining: 0, retryAfterMs: WINDOW_MS };
+        }
+      }
       hits = [];
       this.windows.set(key, hits);
     }
     while (hits.length > 0 && hits[0] <= now - WINDOW_MS) hits.shift();
-    const allowed = hits.length < this.perMinute;
+    const limit = Math.min(this.perMinute, this.burst);
+    const allowed = hits.length < limit;
     if (allowed) hits.push(now);
-    const remaining = Math.max(0, this.perMinute - hits.length);
+    const remaining = Math.max(0, limit - hits.length);
     const retryAfterMs = hits.length > 0 ? Math.max(0, WINDOW_MS - (now - hits[0])) : 0;
     return { allowed, remaining, retryAfterMs };
   }
@@ -70,8 +80,20 @@ export function createLimiters(config) {
   return { chat, auth, widget, ip };
 }
 
-export function clientIp(req) {
-  const fwd = req.headers["x-forwarded-for"];
-  if (fwd) return String(fwd).split(",")[0].trim();
+/**
+ * 解析客户端 IP。
+ *
+ * 默认只信任 TCP 对端地址；只有显式开启 trustProxy 时才读取
+ * X-Forwarded-For，并且取最右侧的值（可信反代追加的真实客户端 IP），
+ * 避免请求方自行伪造左侧条目绕过限流。
+ */
+export function clientIp(req, { trustProxy = false } = {}) {
+  if (trustProxy) {
+    const fwd = req.headers["x-forwarded-for"];
+    if (fwd) {
+      const parts = String(fwd).split(",").map((s) => s.trim()).filter(Boolean);
+      if (parts.length > 0) return parts[parts.length - 1];
+    }
+  }
   return req.socket?.remoteAddress ?? "unknown";
 }

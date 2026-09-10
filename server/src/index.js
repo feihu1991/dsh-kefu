@@ -1,7 +1,7 @@
 // dsh-kefu — DSH 多租户客服平台插件入口（cordis plugin，挂到 web profile）
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { createReadStream } from "node:fs";
-import { join, dirname, extname, normalize } from "node:path";
+import { join, dirname, extname, isAbsolute, normalize, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -24,6 +24,12 @@ const Config = z.object({
   dataDir: z.string().default(""),
   /** 是否开放商家自助注册 */
   allowRegistration: z.boolean().default(true),
+  /** 是否信任上游反向代理的 X-Forwarded-For（默认关闭；开启时取最右侧地址） */
+  trustProxy: z.boolean().default(false),
+  /** HTTPS 部署时应设为 true，为会话 Cookie 增加 Secure 标志 */
+  secureCookie: z.boolean().default(false),
+  /** 是否在登录响应中返回 Bearer token（默认关闭，仅使用 HttpOnly Cookie） */
+  exposeSessionToken: z.boolean().default(false),
   /** 客服回合超时（毫秒） */
   agentTimeoutMs: z.natural().default(5 * 60 * 1000),
   /** 默认档位（当 Agent 未选档位时） */
@@ -50,27 +56,36 @@ const Config = z.object({
 
 function apply(ctx, config) {
   const dshHome = process.env.DSH_HOME || join(homedir(), ".dsh");
-  const dataDir = config.dataDir || join(dshHome, "kefu");
+  const dataDir = config.dataDir ? resolve(config.dataDir) : join(dshHome, "kefu");
   const dbPath = join(dataDir, "kefu.sqlite");
   const statePath = join(dataDir, "kefu-state.json");
   const basePath = normalize(config.basePath || "/kefu").replace(/\/+$/, "");
 
   const store = new KefuStore(dbPath);
-  const state = loadState(statePath);
-  const limits = createLimiters({ rateLimit: state.platform.rateLimit ?? {} });
+  const state = loadState(statePath, { allowRegistration: config.allowRegistration });
+  state.platform.rateLimit = sanitizeRateLimit(state.platform.rateLimit);
 
   function saveState() {
-    writeFileSync(statePath, JSON.stringify({ platform: state.platform }, null, 2));
+    // 原子写入：先写临时文件再 rename，避免崩溃/并发导致状态文件损坏。
+    const tmpPath = `${statePath}.tmp-${process.pid}-${Date.now()}`;
+    writeFileSync(tmpPath, JSON.stringify({ platform: state.platform }, null, 2), { mode: 0o600 });
+    renameSync(tmpPath, statePath);
   }
 
   // 管理端改限流设置后即时生效
   function rebuildLimiters() {
-    const next = createLimiters({ rateLimit: state.platform.rateLimit ?? {} });
+    const next = createLimiters({ rateLimit: sanitizeRateLimit(state.platform.rateLimit) });
     limits.chat = next.chat;
     limits.auth = next.auth;
     limits.widget = next.widget;
     limits.ip = next.ip;
   }
+
+  // 暴露给 api.js 中的管理接口使用。
+  state.save = saveState;
+  state.rebuildLimiters = rebuildLimiters;
+
+  const limits = createLimiters({ rateLimit: sanitizeRateLimit(state.platform.rateLimit) });
 
   // ---- 种子：默认档位 ----
   if (store.listTiers().length === 0) {
@@ -93,7 +108,7 @@ function apply(ctx, config) {
   const api = createApiHandler({ store, config: { ...config, dataDir, basePath }, limiters: limits, state, ctx });
 
   // ---- 路由：/kefu/* ----
-  ctx.webServer.register({
+  const disposeRoute = ctx.webServer.register({
     kind: "prefix",
     path: basePath,
     handler: async (req, res) => {
@@ -124,6 +139,7 @@ function apply(ctx, config) {
 
   ctx.logger?.info?.(`[kefu] 客服平台已启动：${basePath}（数据目录 ${dataDir}）`);
   ctx.on("dispose", () => {
+    try { disposeRoute(); } catch { /* ignore */ }
     try { store.close(); } catch { /* ignore */ }
   });
 }
@@ -132,7 +148,8 @@ function apply(ctx, config) {
 function serveAsset(res, rel) {
   const safe = rel === "" ? "index.html" : rel.split("/").filter(Boolean).join("/");
   const file = join(PUBLIC_DIR, safe);
-  if (!file.startsWith(PUBLIC_DIR) || !existsSync(file)) {
+  const relToPublic = relative(PUBLIC_DIR, file);
+  if (isAbsolute(relToPublic) || relToPublic.startsWith("..") || !existsSync(file)) {
     // SPA 回退
     const index = join(PUBLIC_DIR, "index.html");
     if (existsSync(index)) return serveStatic(res, index, "text/html; charset=utf-8");
@@ -186,11 +203,37 @@ function mimeFor(file) {
   return MIME[extname(file).toLowerCase()] ?? "application/octet-stream";
 }
 
-function loadState(path) {
+function loadState(path, defaults = {}) {
+  let parsed = null;
   try {
-    if (existsSync(path)) return JSON.parse(readFileSync(path, "utf8"));
+    if (existsSync(path)) parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch { /* 损坏则重置 */ }
-  return { platform: { allowRegistration: true, rateLimit: {} } };
+  const platform = parsed?.platform && typeof parsed.platform === "object" ? parsed.platform : {};
+  return {
+    platform: {
+      allowRegistration: platform.allowRegistration ?? defaults.allowRegistration ?? true,
+      rateLimit: platform.rateLimit && typeof platform.rateLimit === "object" ? platform.rateLimit : {},
+    },
+  };
+}
+
+const RATE_LIMIT_KEYS = new Set([
+  "perMinute", "burst",
+  "authPerMinute", "authBurst",
+  "widgetPerMinute", "widgetBurst",
+  "ipPerMinute", "ipBurst",
+]);
+
+/** 过滤状态文件/请求体中的非法限流数值，避免字符串/负数破坏限流器。 */
+function sanitizeRateLimit(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const [key, value] of Object.entries(raw)) {
+    if (!RATE_LIMIT_KEYS.has(key)) continue;
+    const n = Number(value);
+    if (Number.isInteger(n) && n > 0 && n <= 1_000_000) out[key] = n;
+  }
+  return out;
 }
 
 function randomPassword(len = 12) {

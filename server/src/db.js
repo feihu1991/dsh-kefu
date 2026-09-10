@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS merchants (
   id         TEXT PRIMARY KEY,
@@ -82,7 +83,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   title          TEXT DEFAULT '',
   status         TEXT NOT NULL DEFAULT 'open',     -- open | closed
   dsh_session_id TEXT NOT NULL,
-  created_by     TEXT REFERENCES users(id),
+  created_by     TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,
   meta           TEXT NOT NULL DEFAULT '{}'
@@ -230,6 +231,9 @@ export class KefuStore {
   }
 
   deleteUser(id) {
+    // 兼容旧库（旧 schema 的 created_by 无 ON DELETE SET NULL）：
+    // 先解绑该账号创建过的会话，避免 FOREIGN KEY constraint failed。
+    this.db.prepare("UPDATE conversations SET created_by = NULL WHERE created_by = ?").run(id);
     this.db.prepare("DELETE FROM users WHERE id = ?").run(id);
   }
 
