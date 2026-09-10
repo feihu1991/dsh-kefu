@@ -38,10 +38,22 @@
 </div>
 <script>
 (function () {
-  var token = location.pathname.split("/").filter(Boolean).pop();
-  var base = "/kefu/api/widget/" + token;
-  var visitorId = localStorage.getItem("kefu_visitor") || Math.random().toString(36).slice(2, 12);
-  localStorage.setItem("kefu_visitor", visitorId);
+  var path = location.pathname;
+  var widgetIdx = path.indexOf("/widget/");
+  var basePath = widgetIdx >= 0 ? path.slice(0, widgetIdx) : "";
+  var token = path.split("/").filter(Boolean).pop();
+  var apiBase = basePath + "/api/widget/" + token;
+  var VISITOR_KEY = "kefu_visitor";
+  function loadVisitor() {
+    var stored = localStorage.getItem(VISITOR_KEY);
+    if (stored && /\.[0-9a-f]{32}$/.test(stored)) return Promise.resolve(stored);
+    return fetch(apiBase + "/visitor").then(function (r) { return r.json(); }).then(function (d) {
+      if (d.error) throw new Error(d.error.message);
+      localStorage.setItem(VISITOR_KEY, d.data.visitorId);
+      return d.data.visitorId;
+    });
+  }
+  var visitorPromise = loadVisitor();
   var body = document.getElementById("body");
   var input = document.getElementById("input");
   var sendBtn = document.getElementById("send");
@@ -62,7 +74,7 @@
     return span;
   }
 
-  fetch(base + "/config").then(function (r) { return r.json(); }).then(function (d) {
+  fetch(apiBase + "/config").then(function (r) { return r.json(); }).then(function (d) {
     if (d.error) throw new Error(d.error.message);
     document.getElementById("merchant").textContent = d.data.merchantName;
     document.getElementById("agent").textContent = d.data.agentName + " · " + (d.data.tierName || "智能客服");
@@ -80,10 +92,12 @@
     input.value = "";
     add("user", content);
     var pending = add("assistant", "…");
-    fetch(base + "/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: content, visitorId: visitorId })
+    visitorPromise.then(function (visitorId) {
+      return fetch(apiBase + "/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: content, visitorId: visitorId })
+      });
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (d.error) throw new Error(d.error.message);
       pending.textContent = d.data.message.content;

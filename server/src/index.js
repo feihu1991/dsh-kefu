@@ -30,6 +30,8 @@ const Config = z.object({
   secureCookie: z.boolean().default(false),
   /** 是否在登录响应中返回 Bearer token（默认关闭，仅使用 HttpOnly Cookie） */
   exposeSessionToken: z.boolean().default(false),
+  /** 每个商家每天允许的 widget 消息总量（含用户+客服；0 = 不限制） */
+  widgetDailyMessageLimit: z.natural().default(2000),
   /** 客服回合超时（毫秒） */
   agentTimeoutMs: z.natural().default(5 * 60 * 1000),
   /** 默认档位（当 Agent 未选档位时） */
@@ -62,13 +64,16 @@ function apply(ctx, config) {
   const basePath = normalize(config.basePath || "/kefu").replace(/\/+$/, "");
 
   const store = new KefuStore(dbPath);
-  const state = loadState(statePath, { allowRegistration: config.allowRegistration });
+  const state = loadState(statePath, {
+    allowRegistration: config.allowRegistration,
+    widgetDailyMessageLimit: config.widgetDailyMessageLimit,
+  });
   state.platform.rateLimit = sanitizeRateLimit(state.platform.rateLimit);
 
   function saveState() {
     // 原子写入：先写临时文件再 rename，避免崩溃/并发导致状态文件损坏。
     const tmpPath = `${statePath}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(tmpPath, JSON.stringify({ platform: state.platform }, null, 2), { mode: 0o600 });
+    writeFileSync(tmpPath, JSON.stringify({ platform: state.platform, secrets: state.secrets }, null, 2), { mode: 0o600 });
     renameSync(tmpPath, statePath);
   }
 
@@ -86,6 +91,12 @@ function apply(ctx, config) {
   state.rebuildLimiters = rebuildLimiters;
 
   const limits = createLimiters({ rateLimit: sanitizeRateLimit(state.platform.rateLimit) });
+
+  // 首次启动生成 widget visitorId 签名密钥，并持久化（不通过管理接口暴露）。
+  if (!state.secrets.widgetSecret) {
+    state.secrets.widgetSecret = randomBytes(32).toString("hex");
+    saveState();
+  }
 
   // ---- 种子：默认档位 ----
   if (store.listTiers().length === 0) {
@@ -209,10 +220,17 @@ function loadState(path, defaults = {}) {
     if (existsSync(path)) parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch { /* 损坏则重置 */ }
   const platform = parsed?.platform && typeof parsed.platform === "object" ? parsed.platform : {};
+  const secrets = parsed?.secrets && typeof parsed.secrets === "object" ? parsed.secrets : {};
   return {
     platform: {
       allowRegistration: platform.allowRegistration ?? defaults.allowRegistration ?? true,
+      widgetDailyMessageLimit: Number.isInteger(platform.widgetDailyMessageLimit)
+        ? platform.widgetDailyMessageLimit
+        : defaults.widgetDailyMessageLimit ?? 2000,
       rateLimit: platform.rateLimit && typeof platform.rateLimit === "object" ? platform.rateLimit : {},
+    },
+    secrets: {
+      widgetSecret: typeof secrets.widgetSecret === "string" ? secrets.widgetSecret : "",
     },
   };
 }

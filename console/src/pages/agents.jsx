@@ -43,10 +43,16 @@ export default function AgentsPage({ session }) {
 
   const createWidget = async (agent) => {
     try {
-      const d = await api(`/agents/${agent.id}/widget-tokens`, { method: "POST" });
+      const allowedOrigins = prompt(
+        "允许使用该凭据的店铺域名（可选，多个用逗号分隔，例如 https://shop.example.com）\n留空表示不限制来源。",
+        ""
+      ) ?? "";
+      const d = await api(`/agents/${agent.id}/widget-tokens`, { method: "POST", body: { allowedOrigins } });
+      const currentBase = location.pathname.replace(/\/+$/, "");
+      const assetBase = location.origin + currentBase;
       const page = `${location.origin}${d.url}`;
-      const sdk = `<script src="${location.origin}/kefu/kefu-sdk.js" data-token="${d.token}" data-server="${location.origin}"><\/script>`;
-      const demo = `${location.origin}/kefu/sdk-demo.html?token=${d.token}`;
+      const sdk = `<script src="${assetBase}/kefu-sdk.js" data-token="${d.token}" data-server="${location.origin}" data-base-path="${currentBase}"><\/script>`;
+      const demo = `${assetBase}/sdk-demo.html?token=${d.token}`;
       alert(
         `网页客服已生成！\n\n` +
         `① 独立问答页（可发链接/iframe 嵌入）：\n${page}\n\n` +

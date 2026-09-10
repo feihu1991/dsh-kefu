@@ -67,7 +67,8 @@ DEEPSEEK_API_KEY=sk-xxx dsh web --host 0.0.0.0 --port 3080
 > 推荐的插件配置：
 > - HTTPS 部署时设置 `secureCookie: true`，为会话 Cookie 增加 `Secure` 标志；
 > - 只有请求确实经过可信反向代理时才设置 `trustProxy: true`，此时按 `X-Forwarded-For` 最右侧地址做 IP 限流；
-> - 默认 `exposeSessionToken: false`，登录只下发 HttpOnly Cookie；仅当外部客户端必须使用 Bearer 时才显式开启。
+> - 默认 `exposeSessionToken: false`，登录只下发 HttpOnly Cookie；仅当外部客户端必须使用 Bearer 时才显式开启；
+> - 每个商家每天的 widget 消息额度由 `widgetDailyMessageLimit` 控制（默认 2000，0 = 不限制），超管可在平台设置中调整。
 
 ## 核心能力
 
@@ -82,7 +83,7 @@ DEEPSEEK_API_KEY=sk-xxx dsh web --host 0.0.0.0 --port 3080
 | `superadmin` | 平台管理：商家 / 账号 / 档位 / 平台设置 / 审计 |
 | `merchant_admin` | 商家管理员：建店员账号、建/改/停 Agent、网页客服凭据、接待 |
 | `merchant_staff` | 店员：仅接待会话 |
-- 密码 scrypt 存储；登录连续失败 5 次锁定 15 分钟；会话 12 小时（默认仅 HttpOnly Cookie，`exposeSessionToken: true` 时额外支持 Bearer）
+- 密码 scrypt 存储；登录连续失败 5 次锁定 15 分钟；锁定期内使用**正确密码仍可登录并立即解锁**（避免攻击者用错误密码把真实用户持续锁死）；会话 12 小时（默认仅 HttpOnly Cookie，`exposeSessionToken: true` 时额外支持 Bearer）
 
 ### 店员 Agent
 - 商家创建 Agent：名称、人设话术、**服务档位**（商家只看到档位名，如「高级客服」，看不到 provider/model）
@@ -100,16 +101,21 @@ DEEPSEEK_API_KEY=sk-xxx dsh web --host 0.0.0.0 --port 3080
 ### 客服网页问答（v1 可用 + v2 悬浮球 SDK）
 - 商家在「店员管理 → 网页客服」生成凭据 token，拿到三种接入方式：
   1. **独立问答页** `{base}/widget/<token>`：可发链接，可 iframe 嵌入店铺网页
-  2. **悬浮球 SDK**（推荐）：店铺页面加一行 `<script src="{server}/kefu/kefu-sdk.js" data-token="…">`，
+  2. **悬浮球 SDK**（推荐）：店铺页面加一行
+     `<script src="{server}{base}/kefu-sdk.js" data-token="…" data-server="{server}" data-base-path="{base}"></script>`，
      右下角气泡聊天面板，自动续接会话（演示页 `{base}/sdk-demo.html?token=…`）
   3. 公开接口（免登录、按 IP + token 双限流）：
      - `GET  {base}/widget/<token>/config` — 商家名 / 客服名 / 欢迎语
-     - `POST {base}/widget/<token>/messages` — 聊天（按 visitorId 续接同一会话）
+     - `GET  {base}/widget/<token>/visitor` — 获取服务端 HMAC 签名的 visitorId
+     - `POST {base}/widget/<token>/messages` — 聊天（请求携带签名的 visitorId 续接同一会话）
+- 凭据可配置店铺 **Origin 白名单**（如 `https://shop.example.com`）：带 Origin 的浏览器请求必须匹配，否则 403
+- 每个商家有每日 widget 消息额度（`widgetDailyMessageLimit`，默认 2000，0 = 不限制），防止公开 token 被滥用刷模型费用
 - **规划**：知识库向量化（语义检索）、转人工、订单查询工具
 
-### 限流
+### 限流与额度
 - 登录：10 次/分钟/IP；注册：按 IP；聊天：30 次/分钟/账号 + 60 次/分钟/IP；网页客服：10 次/分钟/凭据
-- 超管可在「平台设置」改数值，即时生效（内存滑动窗口）
+- 每个商家每天另有 widget 消息总额度（默认 2000，0 = 不限制）
+- 超管可在「平台设置」改数值，即时生效（内存滑动窗口与 SQLite 跨进程回合锁配合）
 
 ## API 一览（前缀 `{base}/api`，默认 `/kefu/api`）
 
@@ -121,7 +127,7 @@ DEEPSEEK_API_KEY=sk-xxx dsh web --host 0.0.0.0 --port 3080
 | GET | `/tiers` | 服务档位（仅公开字段） |
 | GET/POST | `/agents` | 店员 Agent 列表 / 新建 |
 | PATCH/DELETE | `/agents/:id` | 改 / 删 Agent |
-| GET/POST | `/agents/:id/widget-tokens` | 网页客服凭据 |
+| GET/POST | `/agents/:id/widget-tokens` | 网页客服凭据（可含店铺 Origin 白名单） |
 | GET/POST | `/conversations` | 会话列表 / 新建 |
 | GET/POST | `/conversations/:id/messages` | 历史 / 发消息（SSE 流式） |
 | PATCH | `/conversations/:id` | 关闭 / 重开 / 改标题 |
@@ -129,9 +135,9 @@ DEEPSEEK_API_KEY=sk-xxx dsh web --host 0.0.0.0 --port 3080
 | GET/POST | `/kb` `/kb/:id` | 知识库（商家管理员） |
 | GET | `/stats` | 商家统计 |
 | GET/POST | `/admin/merchants` `/admin/users` `/admin/tiers` | 平台管理 |
-| GET/PATCH | `/admin/settings` | 平台设置（注册开关 / 限流） |
+| GET/PATCH | `/admin/settings` | 平台设置（注册开关 / 限流 / widget 每日额度） |
 | GET | `/admin/stats` | 平台统计 + 审计 |
-| GET/POST | `/widget/:token/config` `/widget/:token/messages` | 网页问答公开接口 |
+| GET/POST | `/widget/:token/config` `/widget/:token/visitor` `/widget/:token/messages` | 网页问答公开接口（Origin 白名单 + 签名 visitorId + 每日额度） |
 
 错误统一 `{error: {code, message}}`；429 限流、401 未登录、403 无权限、404 不存在/越权。
 
@@ -156,7 +162,11 @@ $DSH_HOME/kefu/merchants/<id>/      # 商家工作区
 - 上线必须 HTTPS（反向代理），并设置 `secureCookie: true`，否则密码/会话 Cookie 会被嗅探
 - 只有经过可信反向代理时才设置 `trustProxy: true`；否则保留默认值，直接按 TCP 对端地址限流
 - 建议关闭自助注册（平台设置），由超管统一开账号
+- 登录锁定不影响正确密码登录：攻击者无法通过持续输错密码把账号永久锁死
+- 网页客服凭据建议配置店铺 Origin 白名单；visitorId 由服务端 HMAC 签名，无法伪造/枚举
+- 设置 `widgetDailyMessageLimit` 防止公开 token 被滥用消耗模型费用
 - 客服 Agent 通过 `tools.restrict({ allow: [] })` 白名单禁用全部工具；若目标 DSH 不支持该能力，接待会 fail-closed（直接失败），不会带着工具继续运行。升级 DSH 后请跑工具可见性冒烟测试
+- `kefu-state.json` 含 widget 签名密钥，文件权限为 0600；备份时请按敏感配置处理
 - 定期备份 `kefu.sqlite` 与 `merchants/` 目录
 
 ## License

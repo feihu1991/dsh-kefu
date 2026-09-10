@@ -1,5 +1,5 @@
 // dsh-kefu — REST + SSE API 路由（挂在 webServer 的 basePath 前缀下）
-import { randomBytes, createHash, randomUUID } from "node:crypto";
+import { randomBytes, createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -23,6 +23,66 @@ const RATE_LIMIT_KEYS = new Set([
 export function createApiHandler({ store, config, limiters, state, ctx }) {
   /** 进行中的会话回合锁：conversationId -> Promise */
   const turnLocks = new Map();
+
+  /** widget visitorId 签名：raw 由服务端随机生成，客户端只持有签名后的不可伪造凭据。 */
+  function signVisitor(raw) {
+    const secret = state.secrets?.widgetSecret;
+    if (!secret) throw new Error("widget visitor secret missing");
+    const sig = createHmac("sha256", secret).update(raw).digest("hex").slice(0, 32);
+    return `${raw}.${sig}`;
+  }
+
+  function verifyVisitor(visitorToken) {
+    const s = String(visitorToken ?? "");
+    const dot = s.lastIndexOf(".");
+    if (dot <= 0 || dot === s.length - 1) return null;
+    const raw = s.slice(0, dot);
+    const sig = s.slice(dot + 1).toLowerCase();
+    if (!/^[0-9a-f]{32}$/.test(sig)) return null;
+    const secret = state.secrets?.widgetSecret;
+    if (!secret) return null;
+    const expected = createHmac("sha256", secret).update(raw).digest("hex").slice(0, 32);
+    try {
+      return timingSafeEqual(Buffer.from(sig), Buffer.from(expected)) ? raw : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 解析店铺域名白名单：接受字符串（逗号/换行分隔）或数组，只保留 Origin。 */
+  function normalizeAllowedOrigins(raw) {
+    const list = Array.isArray(raw) ? raw : String(raw ?? "").replace(/[\n\r]+/g, ",").split(",");
+    const out = [];
+    for (const item of list) {
+      const s = String(item ?? "").trim();
+      if (!s) continue;
+      let u;
+      try { u = new URL(s); } catch { return { ok: false, error: `无效域名：${s}` }; }
+      if (!["http:", "https:"].includes(u.protocol) || u.pathname !== "/" || u.search || u.hash) {
+        return { ok: false, error: `域名必须是 http(s) Origin，不能带路径：${s}` };
+      }
+      if (!out.includes(u.origin)) out.push(u.origin);
+      if (out.length >= 20) break;
+    }
+    return { ok: true, value: out.join(",") };
+  }
+
+  /** token 配置了域名白名单时，浏览器请求的 Origin 必须匹配；无 Origin 的非浏览器请求放行。 */
+  function widgetOriginAllowed(wt, req) {
+    const allowed = String(wt.allowed_origins || "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (allowed.length === 0) return true;
+    const origin = String(req.headers.origin ?? "").trim();
+    if (origin === "") return true;
+    if (allowed.includes(origin)) return true;
+    // 同源独立问答页（Origin 与请求 Host 一致）始终允许，避免误伤 {base}/widget/<token> 页面。
+    const host = String(req.headers.host ?? "").trim().toLowerCase();
+    if (host) {
+      try {
+        if (new URL(origin).host.toLowerCase() === host) return true;
+      } catch { /* fallthrough */ }
+    }
+    return false;
+  }
 
   return async function route(req, res, pathname) {
     try {
@@ -92,12 +152,21 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       }
       const locked = lockedRemainingMs(user);
       if (locked > 0) {
-        return sendJson(res, 423, { error: { code: "ACCOUNT_LOCKED", message: `账号已锁定，请 ${Math.ceil(locked / 60000)} 分钟后重试` } });
+        // 锁定期内仍允许极少量尝试：密码正确可立即解锁，避免攻击者用
+        // 错误密码把真实用户永久锁在门外；同时限制锁定期的 scrypt 调用量。
+        const lockedLim = limiters.auth.check(`user:${user.id}:locked`);
+        if (!lockedLim.allowed) {
+          return sendJson(res, 423, { error: { code: "ACCOUNT_LOCKED", message: `账号已锁定，请 ${Math.ceil(locked / 60000)} 分钟后重试` } });
+        }
       }
       if (user.status !== "active") {
         return sendJson(res, 403, { error: { code: "ACCOUNT_DISABLED", message: "账号已停用" } });
       }
       if (!(await verifyPassword(password, user.password_hash))) {
+        if (locked > 0) {
+          // 锁定期内错误密码不再续锁/增加失败次数，只返回锁定状态。
+          return sendJson(res, 423, { error: { code: "ACCOUNT_LOCKED", message: `账号已锁定，请 ${Math.ceil(locked / 60000)} 分钟后重试` } });
+        }
         registerLoginFailure(store, user);
         return sendJson(res, 401, { error: { code: "BAD_CREDENTIALS", message: "用户名或密码错误" } });
       }
@@ -229,10 +298,13 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       const id = pathname.split("/")[2];
       const agent = scopedAgent(store, merchant.id, id);
       if (!agent) return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "Agent 不存在" } });
+      const body = await readJson(req);
+      const origins = normalizeAllowedOrigins(body.allowedOrigins);
+      if (!origins.ok) return sendJson(res, 400, { error: { code: "BAD_ORIGINS", message: origins.error } });
       const token = randomBytesHex(24);
-      const wt = store.createWidgetToken({ agentId: id, token });
+      const wt = store.createWidgetToken({ agentId: id, token, allowedOrigins: origins.value });
       store.audit({ actorId: user.id, merchantId: merchant.id, action: "widget.token.create", detail: agent.name });
-      return sendJson(res, 201, { data: { token: wt.token, url: `${config.basePath}/widget/${wt.token}` } });
+      return sendJson(res, 201, { data: { token: wt.token, url: `${config.basePath}/widget/${wt.token}`, allowedOrigins: wt.allowed_origins } });
     }
 
     if (/^\/widget-tokens\/[^/]+$/.test(pathname) && method === "DELETE") {
@@ -304,11 +376,21 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       const ipLim = limiters.ip.check(`ip:${clientIp(req, config)}:chat`);
       if (!ipLim.allowed) return sendJson(res, 429, { error: { code: "RATE_LIMITED", message: "发送太频繁，请稍后再试" } });
 
-      // 同一会话串行处理
+      // 同一会话串行处理：进程内快锁 + SQLite 跨进程租约
       if (turnLocks.has(id)) return sendJson(res, 409, { error: { code: "TURN_IN_PROGRESS", message: "该会话正在接待中，请稍候" } });
+      const lockOwner = randomUUID();
+      if (!store.acquireTurnLock(id, lockOwner, turnLockTtl())) {
+        return sendJson(res, 409, { error: { code: "TURN_IN_PROGRESS", message: "该会话正在接待中，请稍候" } });
+      }
 
       const wantStream = (req.headers.accept ?? "").includes("text/event-stream");
-      const userMsg = store.addMessage({ conversationId: id, role: "user", content });
+      let userMsg;
+      try {
+        userMsg = store.addMessage({ conversationId: id, role: "user", content });
+      } catch (err) {
+        store.releaseTurnLock(id, lockOwner);
+        throw err;
+      }
 
       if (wantStream) {
         res.writeHead(200, {
@@ -352,6 +434,7 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
           }
         } finally {
           turnLocks.delete(id);
+          store.releaseTurnLock(id, lockOwner);
         }
       })();
       turnLocks.set(id, lock);
@@ -700,6 +783,13 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
     if (pathname === "/admin/settings" && method === "PATCH") {
       const body = await readJson(req);
       if (body.allowRegistration !== undefined) state.platform.allowRegistration = body.allowRegistration === true;
+      if (body.widgetDailyMessageLimit !== undefined) {
+        const n = body.widgetDailyMessageLimit;
+        if (!Number.isInteger(n) || n < 0 || n > 1_000_000_000) {
+          return sendJson(res, 400, { error: { code: "BAD_REQUEST", message: "widgetDailyMessageLimit 必须是 0~1000000000 的整数（0=不限制）" } });
+        }
+        state.platform.widgetDailyMessageLimit = n;
+      }
       if (body.rateLimit !== undefined) {
         if (!body.rateLimit || typeof body.rateLimit !== "object" || Array.isArray(body.rateLimit)) {
           return sendJson(res, 400, { error: { code: "BAD_REQUEST", message: "rateLimit 必须是对象" } });
@@ -746,6 +836,7 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       const token = pathname.split("/")[2];
       const wt = store.getWidgetToken(token);
       if (!wt || !wt.enabled) return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "客服组件不存在或已停用" } });
+      if (!widgetOriginAllowed(wt, req)) return sendJson(res, 403, { error: { code: "ORIGIN_NOT_ALLOWED", message: "该店铺域名未被允许使用此客服凭据" } });
       const agent = store.getAgent(wt.agent_id);
       if (!agent || agent.status !== "enabled") return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "客服组件不存在或已停用" } });
       const merchant = store.getMerchant(agent.merchant_id);
@@ -762,10 +853,26 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       });
     }
 
+    if (/^\/widget\/[^/]+\/visitor$/.test(pathname) && method === "GET") {
+      const token = pathname.split("/")[2];
+      const wt = store.getWidgetToken(token);
+      if (!wt || !wt.enabled) return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "客服组件不存在或已停用" } });
+      if (!widgetOriginAllowed(wt, req)) return sendJson(res, 403, { error: { code: "ORIGIN_NOT_ALLOWED", message: "该店铺域名未被允许使用此客服凭据" } });
+      const agent = store.getAgent(wt.agent_id);
+      if (!agent || agent.status !== "enabled") return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "客服组件不存在或已停用" } });
+      const merchant = store.getMerchant(agent.merchant_id);
+      if (!merchant || merchant.status !== "active") return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "客服组件不存在或已停用" } });
+
+      const visitorLim = limiters.ip.check(`ip:${clientIp(req, config)}:widget-visitor`);
+      if (!visitorLim.allowed) return sendJson(res, 429, { error: { code: "RATE_LIMITED", message: "请求太频繁，请稍后再试" } });
+      return sendJson(res, 200, { data: { visitorId: signVisitor(randomUUID()) } });
+    }
+
     if (/^\/widget\/[^/]+\/messages$/.test(pathname) && method === "POST") {
       const token = pathname.split("/")[2];
       const wt = store.getWidgetToken(token);
       if (!wt || !wt.enabled) return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "客服组件不存在或已停用" } });
+      if (!widgetOriginAllowed(wt, req)) return sendJson(res, 403, { error: { code: "ORIGIN_NOT_ALLOWED", message: "该店铺域名未被允许使用此客服凭据" } });
       const agent = store.getAgent(wt.agent_id);
       if (!agent || agent.status !== "enabled") return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "客服组件不存在或已停用" } });
       const merchant = store.getMerchant(agent.merchant_id);
@@ -781,8 +888,23 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       const content = clean(body.content, 8000);
       if (!content) return sendJson(res, 400, { error: { code: "BAD_REQUEST", message: "消息内容不能为空" } });
 
-      // 复用访客会话（visitorId 由前端生成并存 localStorage）
-      const visitorId = clean(body.visitorId, 64) || randomUUID();
+      const rawVisitor = verifyVisitor(body.visitorId);
+      if (!rawVisitor) {
+        return sendJson(res, 400, { error: { code: "INVALID_VISITOR", message: "访客身份无效，请刷新页面后重试" } });
+      }
+
+      // 商家级每日消息额度：0 表示不限制。
+      const dailyLimit = Number(state.platform.widgetDailyMessageLimit ?? config.widgetDailyMessageLimit ?? 0);
+      if (dailyLimit > 0) {
+        const dayStart = new Date();
+        dayStart.setHours(0, 0, 0, 0);
+        if (store.countMessages(merchant.id, dayStart.getTime()) >= dailyLimit) {
+          return sendJson(res, 429, { error: { code: "WIDGET_DAILY_LIMIT", message: "今日客服消息额度已用完，请明天再试" } });
+        }
+      }
+
+      // 复用访客会话（服务端签名的 visitorId 对应 raw 值存库）
+      const visitorId = rawVisitor;
       let conv = store.db.prepare(
         "SELECT * FROM conversations WHERE merchant_id = ? AND agent_id = ? AND channel = 'widget' AND status = 'open' AND json_extract(meta, '$.visitor') = ? LIMIT 1"
       ).get(merchant.id, agent.id, visitorId) ?? null;
@@ -795,8 +917,18 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
         });
       }
 
+      // 同一会话串行处理：进程内快锁 + SQLite 跨进程租约
       if (turnLocks.has(conv.id)) return sendJson(res, 409, { error: { code: "TURN_IN_PROGRESS", message: "接待中，请稍候" } });
-      store.addMessage({ conversationId: conv.id, role: "user", content });
+      const lockOwner = randomUUID();
+      if (!store.acquireTurnLock(conv.id, lockOwner, turnLockTtl())) {
+        return sendJson(res, 409, { error: { code: "TURN_IN_PROGRESS", message: "接待中，请稍候" } });
+      }
+      try {
+        store.addMessage({ conversationId: conv.id, role: "user", content });
+      } catch (err) {
+        store.releaseTurnLock(conv.id, lockOwner);
+        throw err;
+      }
       const lock = (async () => {
         try {
           const result = await runConversationTurn({ ctx, store, config }, {
@@ -811,6 +943,7 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
           sendJson(res, err?.code === "AGENT_TIMEOUT" ? 504 : 502, { error: { code: err?.code ?? "AGENT_ERROR", message: err?.message ?? "客服响应失败" } });
         } finally {
           turnLocks.delete(conv.id);
+          store.releaseTurnLock(conv.id, lockOwner);
         }
       })();
       turnLocks.set(conv.id, lock);
@@ -866,6 +999,11 @@ export function createApiHandler({ store, config, limiters, state, ctx }) {
       throw err;
     }
     return n;
+  }
+
+  function turnLockTtl() {
+    const timeout = Number(config.agentTimeoutMs ?? 300000);
+    return Math.max(30_000, (Number.isFinite(timeout) ? timeout : 300000) + 60_000);
   }
 
   function publicTier(t) {

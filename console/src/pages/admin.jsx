@@ -168,6 +168,10 @@ export default function AdminPage({ session }) {
               <input type="number" value={settings.rateLimit?.widgetPerMinute ?? 10} onChange={(e) => setSettings({ ...settings, rateLimit: { ...settings.rateLimit, widgetPerMinute: Number(e.target.value) } })} />
             </div>
           </div>
+          <div className="field">
+            <label>网页客服每日消息额度（0 = 不限制，含顾客与客服消息）</label>
+            <input type="number" min="0" value={settings.widgetDailyMessageLimit ?? 2000} onChange={(e) => setSettings({ ...settings, widgetDailyMessageLimit: Number(e.target.value) })} />
+          </div>
           <button className="btn primary" onClick={saveSettings}>保存设置</button>
         </div>
       )}

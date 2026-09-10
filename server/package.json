@@ -21,7 +21,7 @@
     "node": ">=22.5.0"
   },
   "scripts": {
-    "test": "node test/e2e.mjs && node test/agents.test.mjs"
+    "test": "node test/e2e.mjs && node test/agents.test.mjs && node test/db.test.mjs"
   },
   "dependencies": {
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.7",

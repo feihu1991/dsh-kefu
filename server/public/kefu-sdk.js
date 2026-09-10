@@ -5,9 +5,10 @@
  *   <script src="https://SERVER/kefu/kefu-sdk.js"
  *           data-token="<网页客服凭据>"
  *           data-server="https://SERVER"           // 可选，默认取脚本域名
+ *           data-base-path="/kefu"                 // 可选，默认从脚本 URL 推导
  *           data-title="在线客服"></script>
  *
- * 能力：右下角悬浮气泡 -> 聊天面板；visitorId 存 localStorage 续接会话；
+ * 能力：右下角悬浮气泡 -> 聊天面板；服务端签名的 visitorId 存 localStorage 续接会话；
  *      欢迎语；发送中状态；跨域调用 widget API。
  */
 (function () {
@@ -16,12 +17,30 @@
   if (!script) return;
   var token = script.getAttribute("data-token") || "";
   var server = (script.getAttribute("data-server") || location.origin).replace(/\/+$/, "");
+  var basePath = script.hasAttribute("data-base-path") ? script.getAttribute("data-base-path") : null;
+  if (basePath === null) {
+    try {
+      var scriptPath = new URL(script.src, location.href).pathname;
+      if (/\/kefu-sdk\.js$/.test(scriptPath)) basePath = scriptPath.replace(/\/kefu-sdk\.js$/, "");
+      else basePath = "/kefu";
+    } catch (_) { basePath = "/kefu"; }
+  }
   var title = script.getAttribute("data-title") || "在线客服";
   if (!token) { console.error("[kefu-sdk] 缺少 data-token"); return; }
-  var API = server + "/kefu/api/widget/" + token;
+  var API = server + basePath + "/api/widget/" + token;
 
-  var visitorId = localStorage.getItem("kefu_visitor") || Math.random().toString(36).slice(2, 12);
-  localStorage.setItem("kefu_visitor", visitorId);
+  function loadVisitor() {
+    var stored = localStorage.getItem("kefu_visitor");
+    if (stored && /\.[0-9a-f]{32}$/.test(stored)) return Promise.resolve(stored);
+    return fetch(API + "/visitor")
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.error) throw new Error(d.error.message);
+        localStorage.setItem("kefu_visitor", d.data.visitorId);
+        return d.data.visitorId;
+      });
+  }
+  var visitorPromise = loadVisitor();
 
   var COLORS = {
     primary: script.getAttribute("data-color") || "#4d6bfe",
@@ -107,10 +126,12 @@
     input.value = "";
     add("user", content);
     typing(true);
-    fetch(API + "/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: content, visitorId: visitorId }),
+    visitorPromise.then(function (visitorId) {
+      return fetch(API + "/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: content, visitorId: visitorId }),
+      });
     })
       .then(function (r) { return r.json(); })
       .then(function (d) {

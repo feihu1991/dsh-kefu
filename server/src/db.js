@@ -103,11 +103,12 @@ CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, create
 
 -- 网页问答凭据（客服小部件）
 CREATE TABLE IF NOT EXISTS widget_tokens (
-  id          TEXT PRIMARY KEY,
-  agent_id    TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-  token       TEXT NOT NULL UNIQUE,
-  enabled     INTEGER NOT NULL DEFAULT 1,
-  created_at  INTEGER NOT NULL
+  id              TEXT PRIMARY KEY,
+  agent_id        TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  token           TEXT NOT NULL UNIQUE,
+  enabled         INTEGER NOT NULL DEFAULT 1,
+  allowed_origins TEXT NOT NULL DEFAULT '',
+  created_at      INTEGER NOT NULL
 );
 
 -- 商家知识库（agent_id 为空 = 全店共享；FTS5 trigram 支持中文子串检索）
@@ -134,6 +135,13 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
+
+-- 跨进程回合锁：多实例部署时防止同一会话被并发接待；expires_at 提供崩溃自动过期。
+CREATE TABLE IF NOT EXISTS turn_locks (
+  conversation_id TEXT PRIMARY KEY,
+  owner           TEXT NOT NULL,
+  expires_at      INTEGER NOT NULL
+);
 `;
 
 const now = () => Date.now();
@@ -144,6 +152,11 @@ export class KefuStore {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.db.exec(SCHEMA);
+    // 旧库迁移：widget_tokens 增加 allowed_origins 列（店铺域名白名单）。
+    const widgetCols = this.db.prepare("PRAGMA table_info(widget_tokens)").all();
+    if (!widgetCols.some((col) => col.name === "allowed_origins")) {
+      this.db.exec("ALTER TABLE widget_tokens ADD COLUMN allowed_origins TEXT NOT NULL DEFAULT ''");
+    }
     this.now = now;
   }
 
@@ -449,9 +462,30 @@ export class KefuStore {
     return this.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE created_at >= ?").get(since).n;
   }
 
+  // ---------- 跨进程回合锁 ----------
+  /**
+   * 尝试获取某会话的回合租约。已有未过期锁时返回 false。
+   * 同一 SQLite 库上的多进程可借此串行化同一会话的接待。
+   */
+  acquireTurnLock(conversationId, owner, ttlMs) {
+    const t = now();
+    const res = this.db.prepare(
+      `INSERT INTO turn_locks (conversation_id, owner, expires_at) VALUES (?, ?, ?)
+       ON CONFLICT(conversation_id) DO UPDATE SET owner = excluded.owner, expires_at = excluded.expires_at
+       WHERE turn_locks.expires_at < ?`
+    ).run(conversationId, owner, t + ttlMs, t);
+    return Number(res.changes) > 0;
+  }
+
+  releaseTurnLock(conversationId, owner) {
+    this.db.prepare("DELETE FROM turn_locks WHERE conversation_id = ? AND owner = ?").run(conversationId, owner);
+  }
+
   // ---------- widget tokens ----------
-  createWidgetToken({ id = randomUUID(), agentId, token }) {
-    this.db.prepare("INSERT INTO widget_tokens (id, agent_id, token, enabled, created_at) VALUES (?, ?, ?, 1, ?)").run(id, agentId, token, now());
+  createWidgetToken({ id = randomUUID(), agentId, token, allowedOrigins = "" }) {
+    this.db.prepare(
+      "INSERT INTO widget_tokens (id, agent_id, token, enabled, allowed_origins, created_at) VALUES (?, ?, ?, 1, ?, ?)"
+    ).run(id, agentId, token, allowedOrigins, now());
     return this.getWidgetToken(token);
   }
 
@@ -460,7 +494,7 @@ export class KefuStore {
   }
 
   listWidgetTokens(agentId) {
-    return this.db.prepare("SELECT id, agent_id, token, enabled, created_at FROM widget_tokens WHERE agent_id = ?").all(agentId);
+    return this.db.prepare("SELECT id, agent_id, token, enabled, allowed_origins, created_at FROM widget_tokens WHERE agent_id = ?").all(agentId);
   }
 
   updateWidgetToken(token, fields) {

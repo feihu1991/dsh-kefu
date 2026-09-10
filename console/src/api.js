@@ -1,5 +1,7 @@
 // API 客户端：会话走 HttpOnly Cookie，SSE 聊天支持
-const BASE = "/kefu/api";
+// basePath 从当前页面路径推导，避免控制台在非 /kefu 前缀下失效。
+const basePath = window.location.pathname.replace(/\/+$/, "");
+const BASE = `${basePath}/api`;
 
 export async function api(path, { method = "GET", body } = {}) {
   const res = await fetch(BASE + path, {

@@ -113,6 +113,35 @@ try {
   r = await call(route, "DELETE", P + "/users/" + staffId, { cookie: ownerCookie });
   assert(r.status === 200, "删除创建过会话的账号返回 200（外键修复）");
 
+  // 2b) 账号被锁后，正确密码仍可登录（防锁定 DoS）
+  r = await call(route, "POST", P + "/users", { cookie: ownerCookie, body: { username: "lockme", password: "secret123" } });
+  assert(r.status === 201, "创建锁定测试账号返回 201");
+  for (let i = 0; i < 5; i++) {
+    r = await call(route, "POST", P + "/auth/login", { body: { username: "lockme", password: "wrongpass" } });
+    assert(r.status === 401, `锁定测试第 ${i + 1} 次错误密码返回 401`);
+  }
+  r = await call(route, "POST", P + "/auth/login", { body: { username: "lockme", password: "secret123" } });
+  assert(r.status === 200, "锁定后用正确密码仍可登录（不再被攻击者 DoS）");
+
+  // 2c) widget visitorId 必须由服务端签名，伪造值直接 400
+  r = await call(route, "POST", P + `/agents/${agentId}/widget-tokens`, {
+    cookie: ownerCookie,
+    body: { allowedOrigins: "https://shop.example.com" },
+  });
+  assert(r.status === 201, "生成网页客服凭据返回 201");
+  const widgetToken = r.json.data.token;
+  assert(r.json.data.allowedOrigins === "https://shop.example.com", "凭据保存了域名白名单");
+
+  r = await call(route, "GET", P + `/widget/${widgetToken}/visitor`, { headers: { origin: "https://evil.example" } });
+  assert(r.status === 403 && r.json.error.code === "ORIGIN_NOT_ALLOWED", "非白名单 Origin 被拒绝");
+  r = await call(route, "GET", P + `/widget/${widgetToken}/visitor`, { headers: { origin: "https://shop.example.com" } });
+  assert(r.status === 200 && /^[0-9a-f-]{36}\.[0-9a-f]{32}$/.test(r.json.data.visitorId), "服务端签发签名 visitorId");
+  r = await call(route, "GET", P + `/widget/${widgetToken}/visitor`, { headers: { origin: "https://server.example", host: "server.example" } });
+  assert(r.status === 200, "同源独立问答页始终允许");
+
+  r = await call(route, "POST", P + `/widget/${widgetToken}/messages`, { body: { content: "hi", visitorId: "forged" } });
+  assert(r.status === 400 && r.json.error.code === "INVALID_VISITOR", "伪造 visitorId 被拒绝");
+
   // 3) 等待种子超管可登录
   let adminCookie = "";
   for (let i = 0; i < 50; i++) {
@@ -125,7 +154,7 @@ try {
   // 4) 设置开关与限流落盘并即时生效
   r = await call(route, "PATCH", P + "/admin/settings", {
     cookie: adminCookie,
-    body: { allowRegistration: false, rateLimit: { authPerMinute: 1 } },
+    body: { allowRegistration: false, widgetDailyMessageLimit: 1234, rateLimit: { authPerMinute: 1 } },
   });
   assert(r.status === 200, "PATCH /admin/settings 返回 200（state.save 修复）");
   const stateFile = join(dir, "kefu-state.json");
@@ -133,6 +162,7 @@ try {
   const saved = JSON.parse(readFileSync(stateFile, "utf8"));
   assert(saved.platform.allowRegistration === false, "注册开关已持久化为 false");
   assert(saved.platform.rateLimit.authPerMinute === 1, "限流值已持久化为 1");
+  assert(saved.platform.widgetDailyMessageLimit === 1234, "widget 每日消息额度已持久化为 1234");
 
   r = await call(route, "POST", P + "/auth/register", { body: { name: "店铺B", username: "newuser", password: "secret123" } });
   assert(r.status === 403, "关闭注册后新用户名返回 403");
@@ -146,6 +176,8 @@ try {
 
   r = await call(route, "PATCH", P + "/admin/settings", { cookie: adminCookie, body: { rateLimit: { authPerMinute: 0 } } });
   assert(r.status === 400, "非法限流值返回 400");
+  r = await call(route, "PATCH", P + "/admin/settings", { cookie: adminCookie, body: { widgetDailyMessageLimit: -1 } });
+  assert(r.status === 400, "非法 widget 日额度返回 400");
 
   for (const dispose of disposes) dispose();
   console.log("\nALL API E2E CHECKS PASSED");
